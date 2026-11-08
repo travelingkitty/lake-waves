@@ -1,0 +1,283 @@
+/* The water is the page. Everything else floats on it. */
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #0b1a20;
+  font-family: var(--font-family-body);
+  color-scheme: dark;
+}
+
+.app {
+  position: fixed;
+  inset: 0;
+}
+
+.water {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+  cursor: grab;
+}
+.water:active {
+  cursor: grabbing;
+}
+
+.panel {
+  position: absolute;
+  background: color-mix(in srgb, #0a161b 52%, transparent);
+  -webkit-backdrop-filter: blur(16px) saturate(1.25);
+  backdrop-filter: blur(16px) saturate(1.25);
+  border: 1px solid rgb(255 255 255 / 0.09);
+  border-radius: var(--radius-container, 16px);
+  box-shadow: 0 10px 40px rgb(0 0 0 / 0.25);
+}
+
+.brand {
+  position: absolute;
+  top: 20px;
+  left: 24px;
+  max-width: min(560px, calc(100% - 48px));
+  text-shadow: 0 1px 12px rgb(0 0 0 / 0.45);
+  pointer-events: none;
+}
+.brand h1 {
+  font-size: 1.25rem;
+  letter-spacing: 0.01em;
+}
+
+.stats {
+  top: 20px;
+  right: 24px;
+  width: 300px;
+  padding: 16px 18px;
+}
+
+.timeline {
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  width: min(1100px, calc(100% - 48px));
+  padding: 12px 16px 6px;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.reveal {
+  position: absolute;
+  right: 20px;
+  bottom: 20px;
+}
+
+.error {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  padding: 16px 20px;
+  max-width: calc(100% - 32px);
+}
+
+/* compass */
+.compass {
+  width: 64px;
+  height: 64px;
+  flex: none;
+  color: #e8f3f5;
+}
+.compass-ring {
+  fill: rgb(255 255 255 / 0.04);
+  stroke: rgb(255 255 255 / 0.25);
+  stroke-width: 1;
+}
+.compass-view {
+  fill: rgb(255 255 255 / 0.1);
+}
+.compass-n {
+  fill: rgb(255 255 255 / 0.7);
+  font-size: 8px;
+  text-anchor: middle;
+  font-weight: 600;
+}
+.compass-arrow {
+  stroke: currentColor;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+.compass-you {
+  fill: rgb(255 255 255 / 0.8);
+}
+
+/* chart */
+.chart {
+  position: relative;
+}
+.chart-plot {
+  position: relative;
+  height: 84px;
+  cursor: ew-resize;
+  touch-action: none;
+}
+.chart-plot svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.chart-plot svg * {
+  vector-effect: non-scaling-stroke;
+}
+.chart-night {
+  fill: rgb(0 0 0 / 0.22);
+}
+.chart-grid {
+  stroke: rgb(255 255 255 / 0.08);
+  stroke-width: 1;
+}
+.chart-day {
+  stroke: rgb(255 255 255 / 0.14);
+  stroke-width: 1;
+}
+.chart-line {
+  fill: none;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.chart-line.selected {
+  stroke-width: 2.5;
+}
+.chart-now {
+  stroke: rgb(255 255 255 / 0.5);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+.chart-hover {
+  stroke: rgb(255 255 255 / 0.3);
+  stroke-width: 1;
+}
+.chart-head {
+  stroke: #fff;
+  stroke-width: 1.5;
+}
+.chart-dot {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin: -7px 0 0 -7px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid;
+  box-shadow: 0 0 0 2px rgb(10 22 27 / 0.8);
+  pointer-events: none;
+}
+.chart-tick,
+.chart-now-label {
+  position: absolute;
+  font-size: 10px;
+  line-height: 1;
+  color: rgb(255 255 255 / 0.55);
+  pointer-events: none;
+}
+.chart-tick {
+  right: 2px;
+  transform: translateY(-120%);
+}
+.chart-now-label {
+  top: 2px;
+  transform: translateX(4px);
+}
+.chart-days {
+  position: relative;
+  height: 16px;
+}
+.chart-days span {
+  position: absolute;
+  top: 2px;
+  transform: translateX(4px);
+  font-size: 11px;
+  color: rgb(255 255 255 / 0.62);
+  white-space: nowrap;
+}
+.chart-tip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  transform: translateX(8px);
+  min-width: 150px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgb(10 20 24 / 0.92);
+  border: 1px solid rgb(255 255 255 / 0.12);
+  display: grid;
+  gap: 2px;
+  pointer-events: none;
+  z-index: 2;
+}
+.chart-tip.flip {
+  transform: translateX(calc(-100% - 8px));
+}
+.chart-tip-row {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  align-items: center;
+  gap: 6px;
+}
+
+/* phones: keep the data small so the water stays the page */
+@media (max-width: 760px) {
+  .brand {
+    top: 12px;
+    left: 16px;
+    max-width: calc(100% - 32px);
+  }
+  .brand h1 {
+    font-size: 1.05rem;
+  }
+  .brand span {
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .stats {
+    top: 70px;
+    right: 16px;
+    left: auto;
+    width: 200px;
+    padding: 10px 12px;
+  }
+  .stats .astryx-text[data-type='display-2'],
+  .stats [class*='display-2'] {
+    font-size: 2rem;
+  }
+  .stats-detail {
+    display: none;
+  }
+  .timeline {
+    width: calc(100% - 32px);
+    bottom: 12px;
+    padding: 10px 12px 4px;
+  }
+  .chart-plot {
+    height: 70px;
+  }
+  .chart-daynum {
+    display: none;
+  }
+}
