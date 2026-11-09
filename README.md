@@ -1,10 +1,14 @@
 # Lake Waves · Chicago
 
-The whole page is Lake Michigan off Chicago, drawn live in WebGL. The water is
-driven, hour by hour, by NOAA GLERL's experimental wave forecast, the same data
-the [GLERL WW3 page](https://www.glerl.noaa.gov/emf/waves/WW3/?pg=ww3) plots
-when you click the Chicago Buoy. The numbers float on top in a few small
-[Astryx](https://github.com/meta/astryx) panels.
+**Live:** https://travelingkitty.github.io/lake-waves/ · Thursday test case: [`?t=thu`](https://travelingkitty.github.io/lake-waves/?t=thu)
+
+The whole page is a surf cam: you stand on a NE-facing Chicago beach looking up the
+shore toward downtown. The lake is drawn live in WebGL and driven hour by hour by
+NOAA GLERL's experimental wave forecast, the same data the
+[GLERL WW3 page](https://www.glerl.noaa.gov/emf/waves/WW3/?pg=ww3) plots when you
+click the Chicago Buoy. Offshore, the water is the forecast. At the beach, the same
+waves shoal, bend and break, and a label marks where. The numbers float on top in a
+few small [Astryx](https://github.com/meta/astryx) panels.
 
 ```bash
 npm install
@@ -50,6 +54,25 @@ All of it is in `src/sim/seaState.js`, shared by the renderer and the test:
 On screen, the **virtual buoy** measures wave height off the rendered surface
 every 0.4 s. The badge turns green when it matches the forecast.
 
+## At the beach
+
+`src/sim/surf.js` carries every wave component from 1.5 km out onto the beach. The
+seabed is illustrative: a 1:11 foreshore, an inner trough and a sandbar about 110 m out.
+
+- **Slowing and shortening:** linear dispersion, ω² = g·k·tanh(k·h).
+- **Bending toward shore:** Snell's law, which keeps the alongshore wavenumber.
+- **Growing:** shoaling and refraction, conserving energy flux.
+- **Breaking:** wave height is capped at 0.6 × depth, the value for random waves
+  (Thornton & Guza). On screen, any crest higher than ~0.4 × depth turns to
+  whitewater, and broken bores and lace roll in to the swash.
+- **Readout:** breaker height, distance out, breaker type (Iribarren number:
+  spilling, plunging or surging), longshore drift (Longuet-Higgins) and runup
+  (Stockdon).
+
+Waves only reach the beach if they're heading for it. On this NE-facing beach a N or NE
+wind sends surf in, while a S or W wind (offshore here) leaves it flat. The model treats
+all waves as wind sea running downwind, so leftover swell after a wind shift isn't modeled.
+
 ## The test
 
 `npm test` takes the next Thursday after the forecast run and checks every
@@ -57,8 +80,12 @@ hour from Wednesday noon to Sunday noon. It builds the exact surface the page
 draws, then measures it the way a buoy would: Hs over a 1.2 km patch and over 30
 minutes at a point, peak period from a Welch spectrum, and heading from slope ×
 vertical velocity. It fails if any hour is off (Hs > 6%/12%, Tp > 15%, heading > 10°).
+Then it carries the same hours onto the beach. It measures the drawn waves, using the
+shader's own formula, along 4 km of shore at 300 m, 110 m and 40 m out. It fails if they
+differ from the surf model by more than 10%, outgrow 0.6 × depth anywhere, or the surf
+table contains a non-finite value.
 
 ## Controls
 
-Drag the water to look around (you start on the Chicago shore facing east).
+Drag the water to look around. The menu (top-left) has sources and settings.
 **Space** plays or pauses, **← →** step an hour, **H** hides the data.

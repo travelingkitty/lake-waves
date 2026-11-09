@@ -16,6 +16,7 @@ import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {components, elevation, measureHs, seaState} from '../src/sim/seaState.js';
 import {conditions, indexOf} from '../src/sim/forecast.js';
+import {FACE, GAMMA, TW, dAt, depth, sample, shoreElevation, transform} from '../src/sim/surf.js';
 
 const id = process.argv[2] ?? '45198';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -130,8 +131,56 @@ for (let i = from; i <= to; i++) {
 
 console.log(`\nEvent: ${above1} h with waves ≥ 1 ft, ${above2} h ≥ 2 ft in this window; Thursday peak ${thuPeak.toFixed(1)} ft.`);
 if (thuPeak < 2) console.log('Note: this run no longer shows a Thursday wave event at this station.');
+
+// --- the beach -----------------------------------------------------------
+// Same hours, now carried onto the surf-cam beach by surf.js. Measures the
+// drawn surface (the shader's own formula) along the shore at several
+// distances out, and checks it against the transform: shoaled/broken height
+// where it should be, never taller than the depth allows.
+console.log(`\nAt the beach (faces ${FACE}°; sandbar ~110 m out; break when Hs > ${GAMMA}·depth)`);
+console.log('time (CT)            offshore  @300 m drawn/model   @110 m drawn/model   @40 m drawn/model    breakers                 drift');
+const PROBES = [300, 110, 40];
+for (let i = from; i <= to; i += 3) {
+  const c = conditions(data, i, 'ens');
+  const sea = seaState(c);
+  const comps = components(sea);
+  const tr = transform(comps, sea);
+  if (![...tr.table, ...tr.deep].every(Number.isFinite)) fails.push(`${label(c.time)}: surf table has non-finite values`);
+  for (let j = 0; j < TW; j++) {
+    const d = dAt(j);
+    if (d > 0.5 && tr.H[j] > GAMMA * Math.max(depth(d), 0.02) + 1e-6) {
+      fails.push(`${label(c.time)}: Hs ${tr.H[j].toFixed(2)} m exceeds ${GAMMA}×depth at ${d.toFixed(0)} m`);
+      break;
+    }
+  }
+  const cells = PROBES.map(d => {
+    const model = sample(tr.table, comps.length, d)[2];
+    // 4·std of the drawn elevation over 4 km of shore and 6 moments in time.
+    let s2 = 0;
+    let n = 0;
+    for (let k = 0; k < 6; k++) {
+      const ph = comps.map(w => w.omega * (100 + 37.3 * k) - w.phase0);
+      for (let s = -2000; s <= 2000; s += 5) {
+        const e = shoreElevation(tr, ph, s, d);
+        s2 += e * e;
+        n++;
+      }
+    }
+    const drawn = 4 * Math.sqrt(s2 / n);
+    if (model > 0.03 && Math.abs(drawn - model) / model > 0.1) {
+      fails.push(`${label(c.time)}: drawn Hs at ${d} m ${(drawn / 0.3048).toFixed(2)} ft vs model ${(model / 0.3048).toFixed(2)} ft`);
+    }
+    return `${(drawn / 0.3048).toFixed(1).padStart(4)}/${(model / 0.3048).toFixed(1).padEnd(4)} ft`;
+  });
+  const r = tr.report;
+  const brk = r.breaking ? `${r.breakerFt.toFixed(1)} ft ${r.type} @${r.distance.toFixed(0)} m` : 'flat';
+  const drift = r.breaking && r.driftMs > 0.05 ? `${r.driftMs.toFixed(1)} m/s → ${r.driftBearing}°` : '—';
+  console.log(`${label(c.time).padEnd(20)} ${c.hsFt.toFixed(1).padStart(5)} ft   ${cells.map(x => x.padEnd(20)).join(' ')} ${brk.padEnd(24)} ${drift}`);
+}
+
 if (fails.length) {
   console.log(`\nFAIL — ${fails.length} mismatch(es):\n  ` + fails.join('\n  '));
   process.exit(1);
 }
-console.log(`PASS — simulated surface matches the forecast every hour (Hs within 6% over the patch, 12% at the buoy; Tp within 15%; heading within 10°).\n`);
+console.log(`PASS — offshore water matches the forecast every hour (Hs within 6% over the patch, 12% at the buoy; Tp within 15%; heading within 10°),`);
+console.log(`       and at the beach the drawn waves match the surf model within 10% and never outgrow the depth.\n`);

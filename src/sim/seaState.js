@@ -119,6 +119,7 @@ export function components(sea) {
       amp: Math.sqrt(2 * c.weight * m0),
       k,
       omega,
+      bearing: b, // direction of travel (rad, clockwise from north)
       dx: Math.sin(b),
       dz: -Math.cos(b),
       phase0: c.phase,

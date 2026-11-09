@@ -1,19 +1,24 @@
-// Full-screen WebGL2 lake surface. No libraries.
+// Surf cam: a NE-facing Chicago beach, drawn in WebGL2. No libraries.
 //
-// Geometry: a polar grid around the viewer (exponential rings out to 15 km),
-// displaced on the GPU by the same 32 wave components seaState.js builds for
-// the current forecast hour (Gerstner form). Short wind ripples (normals only)
-// get their roughness from the Cox–Munk slope law for the forecast wind, and
-// whitecaps from the Beaufort scale. The sky follows the sun for the forecast
-// hour at Chicago, and the cloud deck darkens and drifts with the wind.
+// One screen-space grid is projected onto the lake each frame (dense where you
+// look, so the surf zone is sharp). Each vertex is either water or sand:
+//   * water: the 32 forecast wave components, taken from deep water to the
+//     beach by surf.js (shoaling, refraction, depth-limited breaking), plus
+//     swash running up the beach face;
+//   * sand/land: beach face, berm, promenade, park.
+// Foam marks breaking crests (crest higher than ~0.4 × depth), the broken
+// bores and lace inside the surf zone, the swash edge, and wind whitecaps
+// offshore. The sky follows the sun for the forecast hour; downtown sits up
+// the shore and fades out when the storm haze closes in.
 
 import {approach, components, measureHs, N_WAVES} from './seaState.js';
+import {D0, FACE, TW, transform} from './surf.js';
 
-const EYE_HEIGHT = 3; // m — standing on a Chicago breakwater
-const R_MIN = 1.5;
-const R_MAX = 15000;
-const RINGS = 220;
-const SPOKES = 288;
+const EYE = [0, 6.5, 14]; // world (s, y, -d): on the beach 14 m back from the water, 6.5 m up
+export const VIEW_YAW = FACE - 45; // look out over the break, with the beach running off up the shore
+const GX = 240;
+const GY = 170;
+const HFOV = 70;
 
 const COMMON = /* glsl */ `
 uniform vec3 uSunDir;
@@ -24,6 +29,12 @@ uniform vec3 uHorizon;
 uniform float uCover;
 uniform vec3 uCloud;
 
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float noise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2(1, 0)), f.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), f.x), f.y);
+}
 vec3 skyBase(vec3 d) {
   float y = max(d.y, 0.0);
   vec3 c = mix(uHorizon, uZenith, pow(y, 0.55));
@@ -48,18 +59,38 @@ uniform vec3 uCam;
 uniform float uTime;
 uniform vec2 uWindTo;
 uniform float uWindMs;
+uniform float uFace;
+uniform float uDay;
+uniform float uFogDist;
 ${COMMON}
 
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float noise(vec2 p) {
-  vec2 i = floor(p), f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(hash(i), hash(i + vec2(1, 0)), f.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), f.x), f.y);
-}
 float fbm(vec2 p) {
   float a = 0.5, s = 0.0;
   for (int i = 0; i < 5; i++) { s += a * noise(p); p = p * 2.03 + 17.1; a *= 0.5; }
   return s;
+}
+
+// Downtown, ~11 km up the shore (bearing ~331–351°), apparent heights in degrees.
+vec3 skyline(vec3 d, vec3 c) {
+  float b = mod(degrees(atan(d.x, -d.z)) + uFace + 720.0, 360.0);
+  float e = degrees(asin(clamp(d.y, -1.0, 1.0)));
+  if (b < 331.0 || b > 351.0 || e > 2.2 || e < -0.2) return c;
+  float u = (b - 331.0) * 6.0;
+  float id = floor(u);
+  float r = hash(vec2(id, 7.0));
+  float core = exp(-pow((b - 341.5) / 4.5, 2.0));
+  float top = 0.06 + core * (0.2 + 0.8 * r * r) + (1.0 - core) * 0.16 * r;
+  if (abs(b - 343.2) < 0.17) top = 2.05;
+  if (abs(b - 338.6) < 0.13) top = 1.75;
+  if (abs(b - 340.4) < 0.12) top = 1.42;
+  if (e > top) return c;
+  float vis = exp(-11000.0 / (uFogDist * 2.6));
+  vec3 body = mix(c * 0.6, vec3(0.17, 0.18, 0.21) * (0.3 + 0.7 * uDay), 0.55);
+  vec2 cell = vec2(u * 8.0, e * 45.0);
+  float lit = step(0.6, hash(floor(cell))) * step(0.25, fract(cell.x)) * step(0.3, fract(cell.y));
+  body += vec3(1.0, 0.8, 0.5) * lit * 0.55 * (1.0 - uDay);
+  if (top > 1.7 && e > top - 0.05) body += vec3(1.0, 0.1, 0.05) * step(0.5, fract(uTime * 0.5)) * (1.0 - uDay) * 2.0;
+  return mix(c, body, vis);
 }
 
 void main() {
@@ -67,80 +98,142 @@ void main() {
   vec3 d = normalize(w.xyz / w.w - uCam);
   vec3 c = skyBase(d);
   if (d.y > 0.0) {
-    // cloud deck at ~1.5 km, drifting downwind
     vec2 uv = d.xz / (d.y + 0.06) * 0.9 + uWindTo * uTime * (0.002 + 0.0009 * uWindMs);
     float n = fbm(uv * 1.6);
     float m = smoothstep(1.0 - uCover, 1.0 - uCover + 0.35, n);
     float shade = mix(1.05, 0.62, smoothstep(0.35, 0.9, n));
-    vec3 cloud = uCloud * shade;
-    c = mix(c, cloud, m * smoothstep(0.0, 0.08, d.y));
+    c = mix(c, uCloud * shade, m * smoothstep(0.0, 0.08, d.y));
   }
-  outColor = vec4(c, 1.0);
+  outColor = vec4(skyline(d, c), 1.0);
 }`;
 
-const WATER_VS = /* glsl */ `#version 300 es
-in vec2 aXZ;
+const SURF_VS = /* glsl */ `#version 300 es
+precision highp float;
+precision highp sampler2D;
+in vec2 aGrid;
 uniform mat4 uViewProj;
-uniform vec4 uA[${N_WAVES}];   // dirX, dirZ, k, amplitude
-uniform float uPh[${N_WAVES}]; // accumulated phase
-uniform float uChop;
+uniform mat4 uInvViewProj;
+uniform vec3 uCam;
+uniform vec2 uGridX;
+uniform vec2 uGridY;
+uniform float uCell;
+uniform sampler2D uTable;
+uniform vec4 uDeep[${N_WAVES}];  // ky, kx at D0, amplitude, phase integral at D0
+uniform float uPh[${N_WAVES}];
+uniform float uTime;
+uniform float uRunup;
+uniform float uSwashW;
 out vec3 vWorld;
 out vec3 vNormal;
 out float vEta;
-out float vJac;
+out float vH;
+out float vThick;
+out float vGround;
+out float vFoam;
+out float vHs;
+out float vD;
+out float vS;
+
+const float D0 = ${D0.toFixed(1)};
+const int TW = ${TW};
+const int NR = ${N_WAVES};
+
+vec4 tab(int row, float d) {
+  float u = sqrt(clamp(d / D0, 0.0, 1.0)) * float(TW - 1);
+  int j = min(int(u), TW - 2);
+  float f = u - float(j);
+  return mix(texelFetch(uTable, ivec2(j, row), 0), texelFetch(uTable, ivec2(j + 1, row), 0), f);
+}
+
+// Beach face 1:11 up to a 2 m berm, sand to ~46 m back, a 2.85 m promenade, then park.
+float land(float d) {
+  float y = min(-d * 0.09, 2.0);
+  y += (1.0 - smoothstep(-50.0, -46.0, d)) * 0.85;
+  y += (1.0 - smoothstep(-80.0, -72.0, d)) * 0.15;
+  return y;
+}
+
 void main() {
-  vec2 p = aXZ;
-  float spacing = max(length(p) * 0.045, 0.15);
-  vec3 n = vec3(0.0, 1.0, 0.0);
-  vec2 disp = vec2(0.0);
+  vec2 ndc = vec2(mix(uGridX.x, uGridX.y, aGrid.x), mix(uGridY.x, uGridY.y, aGrid.y));
+  vec4 far = uInvViewProj * vec4(ndc, 1.0, 1.0);
+  vec3 rd = normalize(far.xyz / far.w - uCam);
+  float t = rd.y < -1e-4 ? -uCam.y / rd.y : 1e9;
+  t = min(t, 30000.0);
+  vec2 xz = uCam.xz + rd.xz * t;
+  float s = xz.x;
+  float d = -xz.y;
+  float spacing = t * uCell / max(-rd.y, 0.04);
+
+  vec4 sc = tab(NR, clamp(d, 0.0, D0));
+  float h = d > 0.0 ? sc.x : 0.0;
   float eta = 0.0;
-  float jac = 1.0;
-  for (int i = 0; i < ${N_WAVES}; i++) {
-    vec4 a = uA[i];
-    float k = a.z;
-    float L = 6.2831853 / k;
-    float A = a.w * (1.0 - smoothstep(0.22, 0.5, spacing / L));
-    float th = k * dot(a.xy, p) - uPh[i];
-    float s = sin(th), c = cos(th);
-    eta += A * s;
-    disp += uChop * A * a.xy * c;
-    n.x -= a.x * k * A * c;
-    n.z -= a.y * k * A * c;
-    n.y -= uChop * k * A * s;
-    jac -= uChop * k * A * s;
+  vec2 disp = vec2(0.0);
+  vec3 n = vec3(0.0, 1.0, 0.0);
+  if (d > 0.0) {
+    float chop = sc.w;
+    for (int i = 0; i < NR; i++) {
+      vec4 dp = uDeep[i];
+      float psi, A, kx;
+      if (d >= D0) { psi = dp.w + dp.y * (d - D0); A = dp.z; kx = dp.y; }
+      else { vec4 tv = tab(i, d); psi = tv.x; A = tv.y; kx = tv.z; }
+      float ky = dp.x;
+      float k = max(length(vec2(ky, kx)), 1e-4);
+      A *= 1.0 - smoothstep(0.22, 0.5, spacing * k * 0.1591549);
+      float th = ky * s - psi - uPh[i];
+      float sn = sin(th), cs = cos(th);
+      eta += A * sn;
+      disp += chop * A * vec2(ky, kx) / k * cs;
+      n.x -= A * ky * cs;
+      n.z -= A * kx * cs;
+      n.y -= chop * A * k * sn;
+    }
   }
-  vWorld = vec3(p.x + disp.x, eta, p.y + disp.y);
+  // Swash: the water's edge runs up and down the beach face (infragravity pulse).
+  float swash = uRunup * (0.5 + 0.3 * sin(uSwashW * uTime - 0.021 * s) + 0.2 * sin(1.37 * uSwashW * uTime - 0.034 * s + 1.3));
+  float water = eta + swash * (1.0 - smoothstep(0.0, 14.0, d));
+  float g = d > 0.0 ? -h : land(d);
+  vec3 world = vec3(s, max(water, g), -d);
+  if (water > g) world.xz += disp;
+  else if (d <= 0.0) n = vec3(0.0, 1.0, (land(d + 0.5) - land(d - 0.5)));
+
+  vWorld = world;
   vNormal = n;
   vEta = eta;
-  vJac = jac;
-  gl_Position = uViewProj * vec4(vWorld, 1.0);
+  vH = h;
+  vThick = water - g;
+  vGround = g;
+  vFoam = d > 0.0 ? sc.y : 0.0;
+  vHs = d > 0.0 ? sc.z : 0.0;
+  vD = d;
+  vS = s;
+  gl_Position = uViewProj * vec4(world, 1.0);
 }`;
 
-const WATER_FS = /* glsl */ `#version 300 es
+const SURF_FS = /* glsl */ `#version 300 es
 precision highp float;
 in vec3 vWorld;
 in vec3 vNormal;
 in float vEta;
-in float vJac;
+in float vH;
+in float vThick;
+in float vGround;
+in float vFoam;
+in float vHs;
+in float vD;
+in float vS;
 out vec4 outColor;
 uniform vec3 uCam;
 uniform float uTime;
 uniform vec2 uWindTo;
-uniform float uMicro;  // extra rms slope from wind ripples (Cox–Munk minus resolved waves)
-uniform float uHs;
-uniform float uFoam;   // 0..1 whitecap strength from wind (Beaufort)
+uniform float uMicro;
+uniform float uFoamWind;
 uniform float uFogDist;
-uniform vec3 uDeep;
+uniform vec3 uDeepCol;
 uniform vec3 uScatter;
-uniform vec3 uFoamColor;
+uniform vec3 uAmbient;
+uniform float uRunup;
+uniform float uDrift;
 ${COMMON}
-
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float noise(vec2 p) {
-  vec2 i = floor(p), f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(hash(i), hash(i + vec2(1, 0)), f.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), f.x), f.y);
-}
 
 vec3 skyRefl(vec3 d) {
   vec3 c = skyBase(d);
@@ -151,59 +244,84 @@ void main() {
   vec3 toCam = uCam - vWorld;
   float dist = length(toCam);
   vec3 V = toCam / dist;
-  float foot = max(length(fwidth(vWorld.xz)), 1e-3);
+  vec3 sunL = uSunColor * uSunVis;
+  vec3 col;
 
-  // Short wind waves and ripples: noise in the wind's frame, crests stretched
-  // across the wind, drifting downwind. Three octaves (~3.2, 1.1, 0.38 m).
-  vec2 across = vec2(-uWindTo.y, uWindTo.x);
-  vec2 q = vec2(dot(vWorld.xz, uWindTo), dot(vWorld.xz, across));
-  vec2 grad = vec2(0.0);
-  float resolved = 0.0;
-  for (int j = 0; j < 3; j++) {
-    float L = 3.2 * pow(0.345, float(j));
-    float sc = 6.2831853 / L;
-    float amp = uMicro * 0.38 / sc * (1.0 - smoothstep(0.25, 1.0, foot / L));
-    resolved += (amp * sc) * (amp * sc);
-    vec2 uv = vec2(q.x * sc, q.y * sc * 0.6) - vec2(uTime * sqrt(9.81 * sc) * 0.9, 0.0) + float(j) * 31.7;
-    float e = 0.15;
-    float h0 = noise(uv);
-    float hx = noise(uv + vec2(e, 0.0));
-    float hy = noise(uv + vec2(0.0, e));
-    vec2 g = vec2((hx - h0) / e * sc, (hy - h0) / e * sc * 0.6) * amp;
-    grad += uWindTo * g.x + across * g.y;
+  if (vThick <= 0.0) {
+    // --- sand, promenade, park -------------------------------------------
+    vec3 n = normalize(vNormal);
+    float wet = (1.0 - smoothstep(uRunup * 1.25, uRunup * 1.25 + 0.3, vGround)) * step(-30.0, vD);
+    vec3 sand = vec3(0.78, 0.71, 0.57) * (0.86 + 0.28 * noise(vWorld.xz * 1.9) * noise(vWorld.xz * 0.21));
+    sand = mix(sand, vec3(0.46, 0.41, 0.33), wet * 0.85);
+    float paved = smoothstep(2.55, 2.75, vGround) * step(vD, -45.0);
+    vec3 albedo = mix(sand, vec3(0.5, 0.5, 0.48), paved);
+    albedo = mix(albedo, vec3(0.25, 0.28, 0.18), 1.0 - smoothstep(-80.0, -72.0, vD));
+    col = albedo * (uAmbient + sunL * max(dot(n, uSunDir), 0.0));
+    vec3 R = reflect(-V, n);
+    col += wet * skyRefl(R) * (0.03 + 0.45 * pow(1.0 - max(dot(n, V), 0.0), 5.0));
+  } else {
+    // --- water ------------------------------------------------------------
+    float foot = max(length(fwidth(vWorld.xz)), 1e-3);
+    vec2 across = vec2(-uWindTo.y, uWindTo.x);
+    vec2 q = vec2(dot(vWorld.xz, uWindTo), dot(vWorld.xz, across));
+    vec2 grad = vec2(0.0);
+    float resolved = 0.0;
+    for (int j = 0; j < 3; j++) {
+      float L = 3.2 * pow(0.345, float(j));
+      float sc = 6.2831853 / L;
+      float amp = uMicro * 0.38 / sc * (1.0 - smoothstep(0.25, 1.0, foot / L));
+      resolved += (amp * sc) * (amp * sc);
+      vec2 uv = vec2(q.x * sc, q.y * sc * 0.6) - vec2(uTime * sqrt(9.81 * sc) * 0.9, 0.0) + float(j) * 31.7;
+      float e = 0.15;
+      float h0 = noise(uv);
+      vec2 g = vec2((noise(uv + vec2(e, 0.0)) - h0) / e * sc, (noise(uv + vec2(0.0, e)) - h0) / e * sc * 0.6) * amp;
+      grad += uWindTo * g.x + across * g.y;
+    }
+    vec3 N = normalize(normalize(vNormal) + vec3(-grad.x, 0.0, -grad.y));
+    float rough = clamp(uMicro * uMicro - resolved * 0.5, 0.0, 1.0);
+
+    vec3 R = reflect(-V, N);
+    R.y = abs(R.y);
+    vec3 refl = mix(skyRefl(R), skyRefl(normalize(vec3(R.x, R.y + 0.35, R.z))), clamp(rough * 8.0, 0.0, 0.7));
+    float F = 0.02 + 0.98 * pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 5.0);
+
+    float hsLocal = max(vHs, 0.03);
+    float crest = clamp(vEta / (hsLocal * 0.5), -1.5, 2.5);
+    vec3 body = mix(uDeepCol, uScatter, clamp(0.25 + 0.35 * crest, 0.0, 1.0));
+    float back = pow(clamp(dot(-V, uSunDir) * 0.5 + 0.5, 0.0, 1.0), 3.0);
+    body += uScatter * 0.6 * back * clamp(crest, 0.0, 1.0) * uSunVis;
+    // Shallow water: the sandy bottom shows through, greener and brighter.
+    float clarity = exp(-max(vThick, 0.0) / 1.2);
+    vec3 bottom = vec3(0.5, 0.46, 0.36) * (uAmbient + sunL * 0.7);
+    body = mix(body, mix(bottom, uScatter * 2.2, 0.35), clarity * 0.8);
+    col = mix(body, refl, F * (1.0 - 0.5 * clarity));
+    float spec = pow(max(dot(R, uSunDir), 0.0), mix(900.0, 120.0, clamp(rough * 30.0, 0.0, 1.0)));
+    col += uSunColor * spec * 3.0 * uSunVis;
+
+    // Foam --------------------------------------------------------------
+    // 1. a crest that has outgrown the depth is breaking: whitewater on the lip
+    float lip = smoothstep(0.32, 0.48, vEta / max(vH, 0.05)) * step(0.0, vD) * (1.0 - smoothstep(5.0, 8.0, vH));
+    // 2. inside the break, every crest is a broken bore
+    float bore = vFoam * smoothstep(-0.2, 0.45, crest);
+    // 3. lace left behind, drifting in and along the beach
+    vec2 flow = vec2(vS - uDrift * uTime, vD + 1.3 * uTime);
+    float lace = vFoam * smoothstep(0.5, 0.78, noise(flow * 0.32) * 0.6 + noise(flow * 1.25) * 0.4);
+    // 4. the swash edge
+    float edge = (1.0 - smoothstep(0.02, 0.2, vThick)) * (1.0 - step(25.0, vD));
+    // 5. wind whitecaps offshore (Beaufort)
+    vec2 drift = uWindTo * uTime * 1.2;
+    float groups = noise((vWorld.xz - drift) * 0.045) * 0.65 + noise((vWorld.xz - drift) * 0.11) * 0.35;
+    float wc = uFoamWind * smoothstep(1.15 - 0.6 * uFoamWind, 1.6 - 0.6 * uFoamWind, crest)
+      * smoothstep(0.6 - 0.2 * uFoamWind, 0.76 - 0.18 * uFoamWind, groups) * step(4.0, vH);
+    float tear = noise(vWorld.xz * 0.9 + vec2(uTime * 0.4, 0.0)) * 0.6 + noise(vWorld.xz * 3.1) * 0.4;
+    float surf = max(max(lip, bore * 0.9), max(lace * 0.75, edge * 0.85));
+    float foam = max(surf * smoothstep(0.15, 0.55, tear + 0.3 * surf), wc * smoothstep(0.3, 0.7, tear));
+    vec3 foamCol = vec3(0.93, 0.95, 0.96) * (uAmbient * 1.35 + sunL * max(dot(N, uSunDir), 0.0) * 0.9 + 0.03);
+    col = mix(col, foamCol, clamp(foam, 0.0, 0.97));
   }
-  vec3 N = normalize(normalize(vNormal) + vec3(-grad.x, 0.0, -grad.y));
-  // Ripples too small (or too far) to draw still roughen the reflection.
-  float rough = clamp(uMicro * uMicro - resolved * 0.5, 0.0, 1.0);
-
-  vec3 R = reflect(-V, N);
-  R.y = abs(R.y);
-  vec3 refl = mix(skyRefl(R), skyRefl(normalize(vec3(R.x, R.y + 0.35, R.z))), clamp(rough * 8.0, 0.0, 0.7));
-  float ndv = clamp(dot(N, V), 0.0, 1.0);
-  float F = 0.02 + 0.98 * pow(1.0 - ndv, 5.0);
-
-  float crest = clamp(vEta / max(uHs * 0.5, 0.03), -1.5, 2.5);
-  vec3 body = mix(uDeep, uScatter, clamp(0.25 + 0.35 * crest, 0.0, 1.0));
-  float back = pow(clamp(dot(-V, uSunDir) * 0.5 + 0.5, 0.0, 1.0), 3.0);
-  body += uScatter * 0.6 * back * clamp(crest, 0.0, 1.0) * uSunVis;
-  vec3 col = mix(body, refl, F);
-
-  float spec = pow(max(dot(R, uSunDir), 0.0), mix(900.0, 120.0, clamp(rough * 30.0, 0.0, 1.0)));
-  col += uSunColor * spec * 3.0 * uSunVis;
-
-  // Whitecaps on the steepest crests, more as the wind rises.
-  // Patches ~15–30 m (wave groups breaking), torn up by finer noise.
-  vec2 drift = uWindTo * uTime * 1.2;
-  float groups = noise((vWorld.xz - drift) * 0.045) * 0.65 + noise((vWorld.xz - drift) * 0.11) * 0.35;
-  float patchy = smoothstep(0.6 - 0.2 * uFoam, 0.76 - 0.18 * uFoam, groups);
-  float breakup = noise(vWorld.xz * 0.6 + drift * 0.5) * 0.6 + noise(vWorld.xz * 2.3) * 0.4;
-  float cap = smoothstep(1.15 - 0.6 * uFoam, 1.6 - 0.6 * uFoam, crest + (1.0 - vJac) * 0.8);
-  float foam = uFoam * cap * patchy * smoothstep(0.3, 0.7, breakup);
-  col = mix(col, uFoamColor, clamp(foam, 0.0, 0.95));
 
   float fog = 1.0 - exp(-pow(dist / uFogDist, 1.25));
-  vec3 haze = skyRefl(normalize(vec3(-V.x, 0.012, -V.z)));
-  col = mix(col, haze, fog);
+  col = mix(col, skyRefl(normalize(vec3(-V.x, 0.012, -V.z))), fog);
   outColor = vec4(col, 1.0);
 }`;
 
@@ -236,13 +354,13 @@ function perspective(fovy, aspect, near, far) {
   const nf = 1 / (near - far);
   return [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) * nf, -1, 0, 0, 2 * far * near * nf, 0];
 }
-function lookDir(eye, fwd) {
-  const [fx, fy, fz] = fwd;
-  let rx = fz * 0 - fy * 0, ry = 0, rz = 0;
-  // right = normalize(cross(fwd, up))
-  rx = -fz; ry = 0; rz = fx;
+function lookDir(eye, [fx, fy, fz]) {
+  let rx = -fz;
+  let rz = fx;
   const rl = Math.hypot(rx, rz);
-  rx /= rl; rz /= rl;
+  rx /= rl;
+  rz /= rl;
+  const ry = 0;
   const ux = ry * fz - rz * fy, uy = rz * fx - rx * fz, uz = rx * fy - ry * fx;
   return [rx, ux, -fx, 0, ry, uy, -fy, 0, rz, uz, -fz, 0,
     -(rx * eye[0] + ry * eye[1] + rz * eye[2]), -(ux * eye[0] + uy * eye[1] + uz * eye[2]), fx * eye[0] + fy * eye[1] + fz * eye[2], 1];
@@ -251,6 +369,10 @@ function mul(a, b) {
   const o = new Array(16).fill(0);
   for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) for (let k = 0; k < 4; k++) o[c * 4 + r] += a[k * 4 + r] * b[c * 4 + k];
   return o;
+}
+function transformPoint(m, [x, y, z]) {
+  const w = m[3] * x + m[7] * y + m[11] * z + m[15];
+  return [(m[0] * x + m[4] * y + m[8] * z + m[12]) / w, (m[1] * x + m[5] * y + m[9] * z + m[13]) / w, w];
 }
 function invert(m) {
   const [a00, a01, a02, a03, a10, a11, a12, a13, a20, a21, a22, a23, a30, a31, a32, a33] = m;
@@ -276,6 +398,14 @@ const smooth = (e0, e1, x) => {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
   return t * t * (3 - 2 * t);
 };
+const R = Math.PI / 180;
+
+/** Compass bearing (deg) + elevation -> world vector (x = alongshore, z = onshore). */
+const toWorld = (bearingDeg, elevDeg = 0) => {
+  const b = (bearingDeg - FACE) * R;
+  const e = elevDeg * R;
+  return [Math.sin(b) * Math.cos(e), Math.sin(e), -Math.cos(b) * Math.cos(e)];
+};
 
 /** Sky + light for a sun elevation (rad) and a 0..1 storminess. */
 function lighting(sunDir, storm) {
@@ -284,33 +414,56 @@ function lighting(sunDir, storm) {
   const twilight = smooth(-0.14, 0, el) * (1 - smooth(0.02, 0.22, el));
   let zenith = mix([0.36, 0.5, 0.64], [0.27, 0.31, 0.35], storm);
   let horizon = mix([0.68, 0.74, 0.78], [0.5, 0.53, 0.55], storm);
-  horizon = mix(horizon, [0.78, 0.52, 0.36], twilight * 0.7 * (1 - storm * 0.6));
+  horizon = mix(horizon, [0.85, 0.5, 0.32], twilight * 0.8 * (1 - storm * 0.5));
   // Night over Chicago is never black: the city lights the cloud deck from below.
   const glow = 0.45 + 0.55 * storm;
   zenith = mix(mix([0.03, 0.04, 0.068], [0.1, 0.088, 0.09], glow), zenith, day);
   horizon = mix(mix([0.1, 0.1, 0.12], [0.24, 0.18, 0.15], glow), horizon, Math.max(day, twilight * 0.6));
-  const sunColor = mix([1.0, 0.55, 0.3], [1.0, 0.93, 0.82], smooth(0.02, 0.35, el)).map(v => v * Math.max(day, 0.0));
+  const sunColor = mix([1.0, 0.5, 0.25], [1.0, 0.93, 0.82], smooth(0.02, 0.35, el)).map(v => v * day);
   const light = 0.32 + 0.68 * day;
   return {
-    zenith, horizon, sunColor,
+    day, zenith, horizon, sunColor,
     sunVis: day * (1 - storm * 0.85),
+    ambient: zenith.map((v, i) => v * 0.55 + horizon[i] * 0.45),
     cloud: mix(mix([0.08, 0.08, 0.1], [0.17, 0.14, 0.13], glow), mix([0.78, 0.8, 0.82], [0.42, 0.44, 0.46], storm), Math.max(day, twilight * 0.5)),
     deep: [0.008, 0.045, 0.058].map(v => v * light + 0.004),
     scatter: [0.04, 0.19, 0.18].map(v => v * light + 0.004),
-    foam: [0.86, 0.9, 0.92].map(v => v * (0.35 + 0.65 * day)),
   };
+}
+
+/** Sun azimuth/elevation (degrees) for a time and place. */
+export function sunPosition(ms, lat, lon) {
+  const d = ms / 86400000 + 2440587.5 - 2451545.0;
+  const g = (357.529 + 0.98560028 * d) * R;
+  const q = 280.459 + 0.98564736 * d;
+  const L = (q + 1.915 * Math.sin(g) + 0.02 * Math.sin(2 * g)) * R;
+  const e = (23.439 - 0.00000036 * d) * R;
+  const ra = Math.atan2(Math.cos(e) * Math.sin(L), Math.cos(L));
+  const dec = Math.asin(Math.sin(e) * Math.sin(L));
+  const gmst = (18.697374558 + 24.06570982441908 * d) % 24;
+  const H = (gmst * 15 + lon) * R - ra;
+  const la = lat * R;
+  const el = Math.asin(Math.sin(la) * Math.sin(dec) + Math.cos(la) * Math.cos(dec) * Math.cos(H));
+  const az = Math.atan2(-Math.sin(H), Math.tan(dec) * Math.cos(la) - Math.sin(la) * Math.cos(H));
+  return {az: ((az / R) + 360) % 360, el: el / R};
+}
+
+/** Sun direction in (east, up, south) axes — used for the chart's night shading. */
+export function sunDirection(ms, lat, lon) {
+  const {az, el} = sunPosition(ms, lat, lon);
+  return [Math.sin(az * R) * Math.cos(el * R), Math.sin(el * R), -Math.cos(az * R) * Math.cos(el * R)];
 }
 
 /**
  * @param {HTMLCanvasElement} canvas
  * @param {{onMeasure?: (m:{hsFt:number, sea:object}) => void}} opts
  */
-export function createWater(canvas, {onMeasure} = {}) {
+export function createWater(canvas, {onMeasure, marker} = {}) {
   const gl = canvas.getContext('webgl2', {antialias: true, alpha: false, powerPreference: 'high-performance'});
   if (!gl) throw new Error('WebGL2 is not available in this browser.');
 
   const sky = program(gl, SKY_VS, SKY_FS);
-  const water = program(gl, WATER_VS, WATER_FS);
+  const surf = program(gl, SURF_VS, SURF_FS);
 
   const tri = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, tri);
@@ -321,59 +474,68 @@ export function createWater(canvas, {onMeasure} = {}) {
   gl.enableVertexAttribArray(aPos);
   gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
 
-  // Polar grid around the viewer.
-  const verts = new Float32Array((RINGS + 1) * (SPOKES + 1) * 2);
+  // Screen-space grid, projected onto the lake in the vertex shader.
+  const verts = new Float32Array((GX + 1) * (GY + 1) * 2);
   let o = 0;
-  for (let i = 0; i <= RINGS; i++) {
-    const r = R_MIN * (R_MAX / R_MIN) ** ((i / RINGS) ** 1.08);
-    for (let j = 0; j <= SPOKES; j++) {
-      const a = (j / SPOKES) * Math.PI * 2;
-      verts[o++] = Math.cos(a) * r;
-      verts[o++] = Math.sin(a) * r;
+  for (let j = 0; j <= GY; j++) {
+    for (let i = 0; i <= GX; i++) {
+      verts[o++] = i / GX;
+      verts[o++] = j / GY;
     }
   }
-  const idx = new Uint32Array(RINGS * SPOKES * 6);
+  const idx = new Uint32Array(GX * GY * 6);
   o = 0;
-  for (let i = 0; i < RINGS; i++) {
-    for (let j = 0; j < SPOKES; j++) {
-      const a = i * (SPOKES + 1) + j, b = a + 1, c = a + SPOKES + 1, d = c + 1;
-      idx.set([a, c, b, b, c, d], o);
+  for (let j = 0; j < GY; j++) {
+    for (let i = 0; i < GX; i++) {
+      const a = j * (GX + 1) + i, b = a + 1, c = a + GX + 1, d = c + 1;
+      idx.set([a, b, c, b, d, c], o);
       o += 6;
     }
   }
-  const waterVao = gl.createVertexArray();
-  gl.bindVertexArray(waterVao);
+  const surfVao = gl.createVertexArray();
+  gl.bindVertexArray(surfVao);
   const vb = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, vb);
   gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
-  const aXZ = gl.getAttribLocation(water.p, 'aXZ');
-  gl.enableVertexAttribArray(aXZ);
-  gl.vertexAttribPointer(aXZ, 2, gl.FLOAT, false, 0, 0);
+  const aGrid = gl.getAttribLocation(surf.p, 'aGrid');
+  gl.enableVertexAttribArray(aGrid);
+  gl.vertexAttribPointer(aGrid, 2, gl.FLOAT, false, 0, 0);
   const ib = gl.createBuffer();
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
   gl.bindVertexArray(null);
 
+  // Nearshore table (surf.js) as a float texture.
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, TW, N_WAVES + 1, 0, gl.RGBA, gl.FLOAT, null);
+
   // --- state ---------------------------------------------------------------
-  let target = null; // sea state from seaState()
+  let target = null;
   let cur = null;
-  let sunTarget = [0, 0.3, -1];
+  let tau = 0.8;
+  let sunTarget = toWorld(180, 20);
   let sun = [...sunTarget];
-  let yaw = 90; // compass bearing the camera faces (east, out over the lake)
-  let pitch = -7;
-  let comps = [];
+  let yaw = VIEW_YAW;
+  let pitch = -11;
   const phases = new Float64Array(N_WAVES);
   let phasesInit = false;
-  const uA = new Float32Array(N_WAVES * 4);
   const uPh = new Float32Array(N_WAVES);
-  let t0 = performance.now();
+  let deep = new Float32Array(N_WAVES * 4);
+  let surfReport = null;
+  let tableSea = null;
+  let lastTable = -1e9;
+  const t0 = performance.now();
   let last = t0;
   let lastMeasure = 0;
   let raf = 0;
-  let running = true;
 
   function resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.25);
     const w = Math.round(canvas.clientWidth * dpr);
     const h = Math.round(canvas.clientHeight * dpr);
     if (canvas.width !== w || canvas.height !== h) {
@@ -381,6 +543,9 @@ export function createWater(canvas, {onMeasure} = {}) {
       canvas.height = h;
     }
   }
+
+  const changed = (a, b) => !b || Math.abs(a.hs - b.hs) > 0.004 || Math.abs(a.tp - b.tp) > 0.004
+    || Math.abs(((a.towardDeg - b.towardDeg + 540) % 360) - 180) > 0.15;
 
   function frame(now) {
     raf = requestAnimationFrame(frame);
@@ -390,51 +555,59 @@ export function createWater(canvas, {onMeasure} = {}) {
     const time = (now - t0) / 1000;
     resize();
 
-    cur = approach(cur, target, dt);
-    sun = mix(sun, sunTarget, 1 - Math.exp(-dt / 0.9));
+    cur = approach(cur, target, dt, tau);
+    sun = mix(sun, sunTarget, 1 - Math.exp(-dt / Math.min(tau, 0.3)));
     const sl = Math.hypot(...sun);
     const sunDir = sun.map(v => v / sl);
 
-    comps = components(cur);
+    const comps = components(cur);
     if (!phasesInit) {
       comps.forEach((c, i) => (phases[i] = -c.phase0));
       phasesInit = true;
     }
-    let sumAK = 0;
     let slopeVar = 0;
     comps.forEach((c, i) => {
       phases[i] = (phases[i] + c.omega * dt) % (Math.PI * 2);
-      uA.set([c.dx, c.dz, c.k, c.amp], i * 4);
       uPh[i] = phases[i];
-      sumAK += c.amp * c.k;
       slopeVar += (c.amp * c.k) ** 2 / 2;
     });
-    const chop = Math.min(1, 0.8 / Math.max(sumAK, 1e-6));
+    // Rebuild the nearshore table when the sea has moved on (≤ 15×/s).
+    if (changed(cur, tableSea) && now - lastTable > 66) {
+      const tr = transform(comps, cur);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TW, N_WAVES + 1, gl.RGBA, gl.FLOAT, tr.table);
+      deep = tr.deep;
+      surfReport = tr.report;
+      tableSea = cur;
+      lastTable = now;
+    }
+
     // Cox & Munk (1954): mean-square slope = 0.003 + 5.12e-3 U.
-    const cm = 0.003 + 5.12e-3 * cur.windMs;
-    const micro = Math.sqrt(Math.max(0.002, cm - slopeVar));
-    // Whitecaps: none below ~7 mph (Beaufort 2), "many" by 19–24 mph (Beaufort 5).
-    const foam = smooth(7, 24, cur.windMph);
+    const micro = Math.sqrt(Math.max(0.002, 0.003 + 5.12e-3 * cur.windMs - slopeVar));
+    const foamWind = smooth(7, 24, cur.windMph); // Beaufort 2 → 5
     const storm = Math.min(1, smooth(6, 26, cur.windMph) * 0.8 + smooth(1, 5, cur.hsFt) * 0.35);
     const L = lighting(sunDir, storm);
-    const towardRad = (cur.towardDeg * Math.PI) / 180;
-    const windTo = [Math.sin(towardRad), -Math.cos(towardRad)];
+    const windTo = toWorld(cur.towardDeg);
+    const fogDist = 4200 - 2400 * storm;
+    const drift = surfReport?.breaking ? surfReport.driftMs * (surfReport.driftBearing === (FACE + 90) % 360 ? 1 : -1) : 0;
 
     // Camera
     const aspect = canvas.width / canvas.height;
-    const hfov = (66 * Math.PI) / 180;
-    const fovy = Math.max((50 * Math.PI) / 180, 2 * Math.atan(Math.tan(hfov / 2) / aspect));
-    const yr = (yaw * Math.PI) / 180;
-    const pr = (pitch * Math.PI) / 180;
-    const fwd = [Math.sin(yr) * Math.cos(pr), Math.sin(pr), -Math.cos(yr) * Math.cos(pr)];
-    const eye = [0, EYE_HEIGHT, 0];
-    const viewProj = mul(perspective(fovy, aspect, 0.5, 30000), lookDir(eye, fwd));
+    const hfov = HFOV * R;
+    const fovy = Math.max(48 * R, 2 * Math.atan(Math.tan(hfov / 2) / aspect));
+    const fwd = toWorld(yaw, pitch);
+    const viewProj = mul(perspective(fovy, aspect, 0.5, 40000), lookDir(EYE, fwd));
+    const inv = invert(viewProj);
+    const horizon = toWorld(yaw, 0).map((v, i) => EYE[i] + v * 30000 * (i === 1 ? 0 : 1));
+    horizon[1] = 0;
+    const hy = transformPoint(viewProj, horizon);
+    const yTop = hy[2] > 0 ? Math.min(1.05, hy[1] + 0.03) : 1.05;
 
     gl.viewport(0, 0, canvas.width, canvas.height);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-    const shared = (u) => {
+    const shared = u => {
       gl.uniform3fv(u.uSunDir, sunDir);
       gl.uniform3fv(u.uSunColor, L.sunColor);
       gl.uniform1f(u.uSunVis, L.sunVis);
@@ -442,37 +615,64 @@ export function createWater(canvas, {onMeasure} = {}) {
       gl.uniform3fv(u.uHorizon, L.horizon);
       gl.uniform1f(u.uCover, 0.45 + 0.5 * storm);
       gl.uniform3fv(u.uCloud, L.cloud);
-      gl.uniform3fv(u.uCam, eye);
+      gl.uniform3fv(u.uCam, EYE);
       gl.uniform1f(u.uTime, time);
-      gl.uniform2fv(u.uWindTo, windTo);
+      gl.uniform2fv(u.uWindTo, [windTo[0], windTo[2]]);
+      gl.uniform1f(u.uFogDist, fogDist);
     };
 
-    // Sky
     gl.disable(gl.DEPTH_TEST);
     gl.useProgram(sky.p);
     shared(sky.u);
-    gl.uniformMatrix4fv(sky.u.uInvViewProj, false, invert(viewProj));
+    gl.uniformMatrix4fv(sky.u.uInvViewProj, false, inv);
     gl.uniform1f(sky.u.uWindMs, cur.windMs);
+    gl.uniform1f(sky.u.uFace, FACE);
+    gl.uniform1f(sky.u.uDay, L.day);
     gl.bindVertexArray(skyVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-    // Water
     gl.enable(gl.DEPTH_TEST);
-    gl.useProgram(water.p);
-    shared(water.u);
-    gl.uniformMatrix4fv(water.u.uViewProj, false, viewProj);
-    gl.uniform4fv(water.u.uA, uA);
-    gl.uniform1fv(water.u.uPh, uPh);
-    gl.uniform1f(water.u.uChop, chop);
-    gl.uniform1f(water.u.uMicro, micro);
-    gl.uniform1f(water.u.uHs, cur.hs);
-    gl.uniform1f(water.u.uFoam, foam);
-    gl.uniform1f(water.u.uFogDist, 4200 - 2400 * storm);
-    gl.uniform3fv(water.u.uDeep, L.deep);
-    gl.uniform3fv(water.u.uScatter, L.scatter);
-    gl.uniform3fv(water.u.uFoamColor, L.foam);
-    gl.bindVertexArray(waterVao);
+    gl.useProgram(surf.p);
+    shared(surf.u);
+    gl.uniformMatrix4fv(surf.u.uViewProj, false, viewProj);
+    gl.uniformMatrix4fv(surf.u.uInvViewProj, false, inv);
+    gl.uniform2fv(surf.u.uGridX, [-1.15, 1.15]);
+    gl.uniform2fv(surf.u.uGridY, [-1.7, yTop]);
+    gl.uniform1f(surf.u.uCell, (hfov * 1.15) / GX);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1i(surf.u.uTable, 0);
+    gl.uniform4fv(surf.u.uDeep, deep);
+    gl.uniform1fv(surf.u.uPh, uPh);
+    gl.uniform1f(surf.u.uRunup, surfReport?.runup ?? 0.05);
+    gl.uniform1f(surf.u.uSwashW, (2 * Math.PI) / (2.2 * cur.tp));
+    gl.uniform1f(surf.u.uMicro, micro);
+    gl.uniform1f(surf.u.uFoamWind, foamWind);
+    gl.uniform3fv(surf.u.uDeepCol, L.deep);
+    gl.uniform3fv(surf.u.uScatter, L.scatter);
+    gl.uniform3fv(surf.u.uAmbient, L.ambient);
+    gl.uniform1f(surf.u.uDrift, drift);
+    gl.bindVertexArray(surfVao);
     gl.drawElements(gl.TRIANGLES, idx.length, gl.UNSIGNED_INT, 0);
+
+    // Pin the break-point label to the water where the camera's line of sight crosses it.
+    if (marker) {
+      const rel = (yaw - FACE) * R;
+      const along = Math.sin(rel);
+      const out = Math.cos(rel);
+      let shown = false;
+      if (surfReport?.breaking && surfReport.distance >= 15 && out > 0.15) {
+        const t = (surfReport.distance + EYE[2]) / out;
+        const p = transformPoint(viewProj, [along * t, 0.8, -surfReport.distance]);
+        if (p[2] > 0 && Math.abs(p[0]) < 0.95 && Math.abs(p[1]) < 0.9) {
+          const x = ((p[0] + 1) / 2) * canvas.clientWidth;
+          const y = ((1 - p[1]) / 2) * canvas.clientHeight;
+          marker.style.transform = `translate(${x}px, ${y}px)`;
+          shown = true;
+        }
+      }
+      marker.style.opacity = shown ? '1' : '0';
+    }
 
     if (onMeasure && now - lastMeasure > 400) {
       lastMeasure = now;
@@ -490,7 +690,7 @@ export function createWater(canvas, {onMeasure} = {}) {
   const move = e => {
     if (!drag) return;
     yaw = (drag.yaw - (e.clientX - drag.x) * 0.15 + 360) % 360;
-    pitch = Math.max(-30, Math.min(8, drag.pitch + (e.clientY - drag.y) * 0.1));
+    pitch = Math.max(-35, Math.min(6, drag.pitch + (e.clientY - drag.y) * 0.1));
     api.onView?.(yaw);
   };
   const up = () => (drag = null);
@@ -500,17 +700,19 @@ export function createWater(canvas, {onMeasure} = {}) {
   canvas.addEventListener('pointercancel', up);
 
   const api = {
-    /** @param {object} sea  from seaState()   @param {number[]} sunDirection */
-    set(sea, sunDirection) {
+    /**
+     * @param {object} sea  from seaState()
+     * @param {{az:number, el:number}} sunPos  from sunPosition()
+     * @param {{tau?:number}} opts  smoothing time constant (s); short while playing
+     */
+    set(sea, sunPos, opts = {}) {
       target = sea;
-      if (sunDirection) sunTarget = sunDirection;
+      tau = opts.tau ?? 0.8;
+      if (sunPos) sunTarget = toWorld(sunPos.az, sunPos.el);
       if (!cur) sun = [...sunTarget];
     },
     get yaw() { return yaw; },
-    setYaw(v) { yaw = v; api.onView?.(yaw); },
     onView: null,
-    pause() { running = false; cancelAnimationFrame(raf); },
-    resume() { if (!running) { running = true; last = performance.now(); raf = requestAnimationFrame(frame); } },
     destroy() {
       cancelAnimationFrame(raf);
       canvas.removeEventListener('pointerdown', down);
@@ -521,22 +723,4 @@ export function createWater(canvas, {onMeasure} = {}) {
   };
   raf = requestAnimationFrame(frame);
   return api;
-}
-
-/** Sun direction in world axes (+x east, +z south, y up) for a time and place. */
-export function sunDirection(ms, lat, lon) {
-  const rad = Math.PI / 180;
-  const d = ms / 86400000 + 2440587.5 - 2451545.0;
-  const g = (357.529 + 0.98560028 * d) * rad;
-  const q = 280.459 + 0.98564736 * d;
-  const L = (q + 1.915 * Math.sin(g) + 0.02 * Math.sin(2 * g)) * rad;
-  const e = (23.439 - 0.00000036 * d) * rad;
-  const ra = Math.atan2(Math.cos(e) * Math.sin(L), Math.cos(L));
-  const dec = Math.asin(Math.sin(e) * Math.sin(L));
-  const gmst = (18.697374558 + 24.06570982441908 * d) % 24;
-  const H = (gmst * 15 + lon) * rad - ra;
-  const la = lat * rad;
-  const el = Math.asin(Math.sin(la) * Math.sin(dec) + Math.cos(la) * Math.cos(dec) * Math.cos(H));
-  const az = Math.atan2(-Math.sin(H), Math.tan(dec) * Math.cos(la) - Math.sin(la) * Math.cos(H));
-  return [Math.sin(az) * Math.cos(el), Math.sin(el), -Math.cos(az) * Math.cos(el)];
 }
