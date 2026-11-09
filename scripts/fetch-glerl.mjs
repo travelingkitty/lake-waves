@@ -86,7 +86,19 @@ const init = (fig.layout.annotations ?? [])
   .map(a => /Initialized:\s*([\d-]+)\s+([\d:]+)\s*UTC/.exec(a.text ?? ''))
   .find(Boolean);
 
+// Live Lake Michigan level (NOAA CO-OPS, Calumet Harbor IL, IGLD85 metres):
+// sets where the water meets the sand at Montrose.
+let lakeLevel = null;
+try {
+  const r = await fetch('https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?station=9087044&product=water_level&datum=IGLD&units=metric&time_zone=gmt&format=json&date=latest&application=lake_waves');
+  const v = parseFloat((await r.json()).data?.[0]?.v);
+  if (Number.isFinite(v)) lakeLevel = {igld85: v, station: 'NOAA 9087044 Calumet Harbor', at: new Date().toISOString()};
+} catch {
+  // keep null: the site falls back to a typical level
+}
+
 const data = {
+  lakeLevel,
   station: {id, ...(STATIONS[id] ?? {name: `Station ${id}`})},
   source: {
     page: 'https://www.glerl.noaa.gov/emf/waves/WW3/?pg=ww3',

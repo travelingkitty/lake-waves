@@ -14,29 +14,45 @@
 
 import {G, N_WAVES} from './seaState.js';
 
-export const FACE = 45; // the beach faces NE (bearing of the seaward normal)
-export const D0 = 1500; // m offshore; beyond this the lake is treated as uniform depth
+export let FACE = 45; // bearing of the beach's seaward normal (Montrose: set from the map)
+export let D0 = 1500; // m offshore; beyond this the lake is treated as uniform depth
 export const TW = 512; // samples across the nearshore
 export const GAMMA = 0.6; // breaking: Hs ≤ 0.6 h (Thornton & Guza: Hrms ≈ 0.42 h)
 const R = Math.PI / 180;
 
-// Seabed: steep foreshore, an inner trough, one sandbar ~110 m out, then a
-// gentle slope to ~17 m at 1.5 km. Illustrative of Chicago's sandy beaches.
-const PROFILE = [
+// Seabed along the beach normal. Default: a generic barred Chicago beach.
+// configureBeach() swaps in Montrose's real profile (scripts/build-montrose.mjs:
+// NOAA bathymetry offshore, a modelled bar-free surf-zone envelope inshore).
+let PROFILE = [
   [0, 0], [8, 0.7], [30, 1.3], [60, 1.9], [85, 2.15], [110, 1.75], [140, 2.4],
   [200, 3.4], [300, 5.0], [600, 8.5], [1000, 12.5], [1500, 17.0],
 ];
+let SHIFT = 0; // lake level above the level the profile was mapped at (m)
+let SMOOTH = true;
+
+/**
+ * @param {{face:number, D0:number, profile:number[][], levelShift?:number}} b
+ *   profile: [distance offshore m, depth m] pairs, monotone.
+ */
+export function configureBeach({face, D0: d0, profile, levelShift = 0}) {
+  FACE = face;
+  D0 = d0;
+  PROFILE = profile;
+  SHIFT = levelShift;
+  SMOOTH = false; // dense measured profile: linear interpolation
+}
 
 /** Still-water depth (m) at d metres offshore. */
 export function depth(d) {
   if (d <= 0) return 0;
-  if (d >= D0) return PROFILE.at(-1)[1];
+  if (d >= D0) return Math.max(0.02, PROFILE.at(-1)[1] + SHIFT);
   let i = 1;
   while (PROFILE[i][0] < d) i++;
   const [d0, h0] = PROFILE[i - 1];
   const [d1, h1] = PROFILE[i];
   const t = (d - d0) / (d1 - d0);
-  return Math.max(0.02, h0 + (h1 - h0) * (0.5 - 0.5 * Math.cos(Math.PI * t)));
+  const f = SMOOTH ? 0.5 - 0.5 * Math.cos(Math.PI * t) : t;
+  return Math.max(0.02, h0 + (h1 - h0) * f + SHIFT);
 }
 
 /** Depth for wave maths: never exactly zero at the waterline. */

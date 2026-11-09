@@ -2,8 +2,16 @@
 
 **Live:** https://travelingkitty.github.io/lake-waves/ · Thursday test case: [`?t=thu`](https://travelingkitty.github.io/lake-waves/?t=thu)
 
-The whole page is a surf cam: you stand on a NE-facing Chicago beach looking up the
-shore toward downtown. The lake is drawn live in WebGL and driven hour by hour by
+The whole page is a surf cam at **Montrose Beach, Chicago**. You stand at the water's edge
+off the beach mat (Surfline's lineup marker) or out on the hook. The geography is
+built by `npm run geo` (`scripts/build-montrose.mjs`):
+
+- **OpenStreetMap:** the shoreline, beach, dunes, the hook and its light, buildings and trees.
+- **NOAA NCEI:** bathymetry.
+- **Towers:** real heights for Edgewater and downtown.
+
+The surf-zone sandbars are modelled, because Montrose's bars move. The lake level is
+NOAA's live Calumet Harbor gauge. The lake is drawn live in WebGL and driven hour by hour by
 NOAA GLERL's experimental wave forecast, the same data the
 [GLERL WW3 page](https://www.glerl.noaa.gov/emf/waves/WW3/?pg=ww3) plots when you
 click the Chicago Buoy. Offshore, the water is the forecast. At the beach, the same

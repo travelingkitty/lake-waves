@@ -10,9 +10,10 @@ import {SegmentedControl, SegmentedControlItem} from '@astryxdesign/core/Segment
 import {Slider} from '@astryxdesign/core/Slider';
 import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
-import {VIEW_YAW, createWater, sunPosition} from './sim/water.js';
+import {createWater, sunPosition} from './sim/water.js';
 import {components, seaState} from './sim/seaState.js';
-import {FACE, transform} from './sim/surf.js';
+import {FACE, configureBeach, transform} from './sim/surf.js';
+import {LWD, loadGeo, samplers} from './sim/geo.js';
 import {MODELS, SERIES_COLORS, conditions, indexOf, lastIndex} from './sim/forecast.js';
 import {ForecastChart} from './ForecastChart.jsx';
 
@@ -91,25 +92,31 @@ function Row({label, children}) {
   );
 }
 
-function Menu({data, onHide}) {
+function Menu({data, level, onHide}) {
   const run = data.source.initialized ? whenLabel(Date.parse(data.source.initialized)) : '—';
   return (
     <VStack gap={3}>
       <VStack gap={0.5}>
-        <Heading level={2}>Lake Michigan surf · Chicago</Heading>
-        <Text type="supporting">{data.station.name} {data.station.id} · NOAA GLERL experimental wave forecast · run {run} CT</Text>
+        <Heading level={2}>Montrose Beach · Chicago</Heading>
+        <Text type="supporting">Standing at the end of the beach mat, looking out at the lineup. Waves: {data.station.name} {data.station.id}, NOAA GLERL experimental forecast, run {run} CT.</Text>
       </VStack>
       <Text>
-        Offshore, the water is the forecast: wave height, a period derived from height and wind, and waves running downwind.
-        At the beach, the same waves slow, steepen and bend over a sandbar about 110 m out and the beach face. They break once
-        they get too tall for the depth (about 0.6 × depth). The seabed is illustrative of a NE-facing Chicago beach.
+        The shoreline, the dunes, the hook and its light, the beach house and the trees come from OpenStreetMap. The lake
+        bottom comes from NOAA bathymetry, and the towers on the horizon are real heights. The water level is NOAA&apos;s live
+        Calumet Harbor gauge: {(LWD + level).toFixed(2)} m, {level >= 0 ? '+' : ''}{(level * 100).toFixed(0)} cm over low-water datum.
       </Text>
-      <Text type="supporting">Drag the water to look around · Space play/pause · ← → step an hour · H hide data</Text>
+      <Text>
+        Offshore, the water is the forecast. Inshore, the same waves bend along the beach&apos;s depth contours. They lose
+        height behind the hook and break on the sandbars once they&apos;re too tall for the depth (about 0.6 × depth). The
+        bars are modelled, because Montrose&apos;s bars move from storm to storm.
+      </Text>
+      <Text type="supporting">Drag to look around (downtown is behind you) · Space play/pause · ← → step an hour · H hide data</Text>
       <HStack gap={2} wrap="wrap">
         <Button size="sm" label="GLERL wave forecasts" href={data.source.page} target="_blank" rel="noreferrer" />
         <Button size="sm" label="Source on GitHub" href={REPO} target="_blank" rel="noreferrer" />
         <Button size="sm" variant="ghost" label="Hide data (H)" onClick={onHide} />
       </HStack>
+      <Text type="supporting">Map data © OpenStreetMap contributors (ODbL).</Text>
     </VStack>
   );
 }
@@ -123,7 +130,9 @@ export default function App() {
   const [measured, setMeasured] = useState(null);
   const [hidden, setHidden] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [yaw, setYaw] = useState(VIEW_YAW);
+  const [yaw, setYaw] = useState(27);
+  const [geo, setGeo] = useState(null);
+  const [view, setView] = useState('mat');
   const canvasRef = useRef(null);
   const markerRef = useRef(null);
   const waterRef = useRef(null);
@@ -147,17 +156,30 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    loadGeo().then(setGeo).catch(e => setError(e.message));
+  }, []);
+
+  // Lake level above Low Water Datum (live NOAA gauge, or a typical recent level).
+  const level = data?.lakeLevel?.igld85 ? data.lakeLevel.igld85 - LWD : 0.38;
+  const ready = Boolean(data && geo);
+  const where = useMemo(() => (geo ? samplers(geo) : null), [geo]);
+
+  useEffect(() => {
+    if (!ready) return undefined;
+    configureBeach({face: geo.header.face, D0: geo.header.D0, profile: geo.scene.profile, levelShift: level - geo.header.mapLevel});
     let w;
     try {
-      w = createWater(canvasRef.current, {onMeasure: setMeasured, marker: markerRef.current});
+      w = createWater(canvasRef.current, {geo, level, onMeasure: setMeasured, marker: markerRef.current});
     } catch (e) {
       setError(e.message);
       return undefined;
     }
     w.onView = setYaw;
+    const v0 = new URLSearchParams(location.search).get('view');
+    if (v0) w.setView(v0);
     waterRef.current = w;
     return () => w.destroy();
-  }, []);
+  }, [ready, geo, level]);
 
   const cond = useMemo(() => (data ? conditions(data, f, model) : null), [data, f, model]);
   const sea = useMemo(() => (cond ? seaState(cond) : null), [cond]);
@@ -166,16 +188,24 @@ export default function App() {
   // The surf report for the hour (whole hours only, so playback stays light).
   const hour = Math.round(f);
   const surf = useMemo(() => {
-    if (!data) return null;
+    if (!ready) return null;
     const s = seaState(conditions(data, hour, model));
-    return transform(components(s), s).report;
-  }, [data, hour, model]);
+    const r = transform(components(s), s).report;
+    if (!r.breaking) return r;
+    // The hook and Montrose Point block some directions: scale by the energy that
+    // reaches the break straight out from the mat (spread over ±22.5°).
+    const {profileBase: b, face} = geo.header;
+    const x = b.x + Math.sin(face * Math.PI / 180) * r.distance, y = b.y + Math.cos(face * Math.PI / 180) * r.distance;
+    const fromDeg = (s.towardDeg + 180) % 360;
+    const open = 0.25 * where.shelter(x, y, fromDeg - 22.5) + 0.5 * where.shelter(x, y, fromDeg) + 0.25 * where.shelter(x, y, fromDeg + 22.5);
+    return {...r, open, breakerFt: r.breakerFt * open, breaking: r.breakerFt * open >= 0.3};
+  }, [ready, data, geo, where, hour, model]);
 
   // Hand the forecast hour to the water. This is the whole coupling.
   useEffect(() => {
-    if (!sea || !data) return;
+    if (!sea || !ready) return;
     waterRef.current?.set(sea, sun, {tau: playing ? 0.15 : 0.8});
-  }, [sea, sun, data, playing]);
+  }, [sea, sun, ready, playing]);
 
   // Playback through the forecast.
   useEffect(() => {
@@ -217,7 +247,9 @@ export default function App() {
   let breakAt = '—';
   if (surf?.breaking && surf.breakerFt >= 0.3) {
     breakers = `${surf.breakerFt.toFixed(1)} ft · ${surf.type}`;
-    breakAt = surf.distance < 15 ? 'Shore break' : `~${Math.round(surf.distance / 5) * 5} m out`;
+    breakAt = surf.distance < 15 ? 'Shore break' : `~${Math.round(surf.distance / 5) * 5} m off the mat`;
+  } else if (surf?.open != null && surf.open < 0.35 && sea?.hsFt >= 1) {
+    breakers = 'Flat (hook blocks it)';
   }
 
   return (
@@ -242,9 +274,16 @@ export default function App() {
           <div className="menu">
             <Popover label="About this surf cam" placement="below" alignment="start" width={380} padding={4}
               isOpen={menuOpen} onOpenChange={setMenuOpen}
-              content={<Menu data={data} onHide={() => { setMenuOpen(false); setHidden(true); }} />}>
+              content={<Menu data={data} level={level} onHide={() => { setMenuOpen(false); setHidden(true); }} />}>
               <IconButton label="About and settings" variant="secondary" elevation="low" icon={<Icon icon="menu" />} />
             </Popover>
+            <div className="views">
+              <SegmentedControl size="sm" label="Where you're standing" value={view}
+                onChange={v => { setView(v); waterRef.current?.setView(v); }}>
+                <SegmentedControlItem value="mat" label="Off the mat" />
+                <SegmentedControlItem value="hook" label="The hook" />
+              </SegmentedControl>
+            </div>
           </div>
 
           <aside className="panel stats" aria-live="polite">
@@ -272,7 +311,7 @@ export default function App() {
               </VStack>
 
               <VStack gap={1}>
-                <Text type="label" color="secondary">At the beach</Text>
+                <Text type="label" color="secondary">At Montrose</Text>
                 <Row label="Breakers">{breakers}</Row>
                 <Row label="Breaking">{breakAt}</Row>
                 {surf?.breaking && surf.driftMs > 0.05 && (
@@ -287,7 +326,7 @@ export default function App() {
                   <Compass towardDeg={sea.towardDeg} yaw={yaw} sun={sun} />
                   <VStack gap={0.5}>
                     <Text>Waves from {point(sea.windFromDeg)}</Text>
-                    <Text type="supporting">Beach faces {point(FACE)} · sun {sun.el > 0 ? `up, ${point(sun.az)}` : 'down'}</Text>
+                    <Text type="supporting">Montrose faces {point(FACE)} · sun {sun.el > 0 ? `up, ${point(sun.az)}` : 'down'}</Text>
                   </VStack>
                 </HStack>
               </div>

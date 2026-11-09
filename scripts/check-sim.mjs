@@ -16,12 +16,18 @@ import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {components, elevation, measureHs, seaState} from '../src/sim/seaState.js';
 import {conditions, indexOf} from '../src/sim/forecast.js';
-import {FACE, GAMMA, TW, dAt, depth, sample, shoreElevation, transform} from '../src/sim/surf.js';
+import {FACE, GAMMA, TW, configureBeach, dAt, depth, sample, shoreElevation, transform} from '../src/sim/surf.js';
 
 const id = process.argv[2] ?? '45198';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const data = JSON.parse(await readFile(join(root, 'public', 'data', `${id}.json`), 'utf8'));
 const TZ = 'America/Chicago';
+// The beach is Montrose: its real profile (scripts/build-montrose.mjs) and today's lake level.
+{
+  const scene = JSON.parse(await readFile(join(root, 'public', 'montrose', 'scene.json'), 'utf8'));
+  const level = (data.lakeLevel?.igld85 ?? 176.38) - 176.0;
+  configureBeach({face: scene.face, D0: scene.D0, profile: scene.profile, levelShift: level - scene.mapLevel});
+}
 
 // --- find "next Thursday" after the run, in Chicago time -------------------
 const parts = ms => Object.fromEntries(new Intl.DateTimeFormat('en-US', {
@@ -137,7 +143,7 @@ if (thuPeak < 2) console.log('Note: this run no longer shows a Thursday wave eve
 // drawn surface (the shader's own formula) along the shore at several
 // distances out, and checks it against the transform: shoaled/broken height
 // where it should be, never taller than the depth allows.
-console.log(`\nAt the beach (faces ${FACE}°; sandbar ~110 m out; break when Hs > ${GAMMA}·depth)`);
+console.log(`\nAt the beach (Montrose, faces ${FACE.toFixed(0)}°; break when Hs > ${GAMMA}·depth)`);
 console.log('time (CT)            offshore  @300 m drawn/model   @110 m drawn/model   @40 m drawn/model    breakers                 drift');
 const PROBES = [300, 110, 40];
 for (let i = from; i <= to; i += 3) {
