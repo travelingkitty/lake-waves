@@ -23,6 +23,7 @@ const TZ = 'America/Chicago';
 const HOURS_PER_SECOND = 3; // playback speed; the water itself always runs in real time
 const REPO = 'https://github.com/travelingkitty/lake-waves';
 const CHECK_MS = 10 * 60 * 1000; // how often an open page looks for a newer forecast run
+const HERE = {lat: 41.9655, lon: -87.637}; // Montrose Beach: the sky is the one over the sand, not over the buoy
 const DAYS = 5; // GLERL runs 10 days out; the page shows the first five, where the forecast is worth trusting
 
 /** The run cut to its first DAYS days: every hourly series, however deeply it is nested. */
@@ -62,7 +63,7 @@ function thursday(data) {
   if (start < 0) return null;
   let peak = -1;
   for (let i = start; i < Math.min(start + 24, data.time.length); i++) {
-    const light = celestial(data.time[i], data.station.lat, data.station.lon).el > 2;
+    const light = celestial(data.time[i], HERE.lat, HERE.lon).el > 2;
     if (light && (peak < 0 || (data.hs.ens[i] ?? 0) > (data.hs.ens[peak] ?? 0))) peak = i;
   }
   return {start, peak: peak < 0 ? start + 12 : peak};
@@ -253,7 +254,7 @@ export default function App() {
   const cond = useMemo(() => (data ? conditions(data, f, model) : null), [data, f, model]);
   const sea = useMemo(() => (cond ? seaState(cond) : null), [cond]);
   // Where the sun, the moon and the stars really are at that hour (sun az/el at the top level).
-  const sun = useMemo(() => (cond && data ? celestial(cond.time, data.station.lat, data.station.lon) : {az: 180, el: 0}), [cond, data]);
+  const sun = useMemo(() => (cond && data ? celestial(cond.time, HERE.lat, HERE.lon) : {az: 180, el: 0}), [cond, data]);
 
   // The surf report for the hour (whole hours only, so playback stays light).
   const hour = Math.round(f);

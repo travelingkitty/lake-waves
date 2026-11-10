@@ -14,6 +14,17 @@ const horizon = (ra, dec, lst, la) => {
 };
 
 /**
+ * Lift by the air: near the horizon the atmosphere bends light about half a degree, so the sun
+ * and moon are still in view when geometry says they have gone. With it, the disc touches the
+ * lake at the almanac's rise and set times. (Saemundsson's formula; faded out below the horizon.)
+ */
+const refract = el => {
+  const h = Math.max(el, -1);
+  const lift = 1.02 / Math.tan((h + 10.3 / (h + 5.11)) * R) / 60;
+  return el + lift * Math.min(1, Math.max(0, (el + 6) / 5));
+};
+
+/**
  * @returns {{az: number, el: number, moon: {az: number, el: number, lit: number}, lst: number, lat: number}}
  *   az/el: the sun (degrees). moon.lit: illuminated fraction 0..1.
  *   lst: local sidereal time (radians), lat: latitude (radians) — together they orient the star dome.
@@ -32,6 +43,7 @@ export function celestial(ms, lat, lon) {
   const sra = Math.atan2(Math.cos(eps) * Math.sin(L), Math.cos(L));
   const sdec = Math.asin(Math.sin(eps) * Math.sin(L));
   const sun = horizon(sra, sdec, lst, la);
+  sun.el = refract(sun.el);
 
   // Moon
   const T = d / 36525;
@@ -47,6 +59,7 @@ export function celestial(ms, lat, lon) {
   const mdec = Math.asin(z);
   const moon = horizon(mra, mdec, lst, la);
   moon.el -= 0.95 * Math.cos(moon.el * R); // parallax: the moon is close enough to sit lower than its geocentric place
+  moon.el = refract(moon.el);
   const cosElong = Math.sin(sdec) * Math.sin(mdec) + Math.cos(sdec) * Math.cos(mdec) * Math.cos(sra - mra);
   moon.lit = (1 - cosElong) / 2;
 
