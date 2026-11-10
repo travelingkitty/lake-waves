@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "data": "node scripts/fetch-glerl.mjs",
+    "geo": "node scripts/build-montrose.mjs",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",

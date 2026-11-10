@@ -1,26 +1,29 @@
 # Keeps the public page current without anyone's computer on:
-# pull the newest GLERL run, prove the water still matches it, deploy.
+# every hour, pull the newest GLERL run; if it is new, prove the water still matches it and deploy.
 name: Refresh forecast and deploy
 
 on:
   push:
     branches: [main]
   schedule:
-    - cron: '23 */6 * * *' # GLERL posts two runs a day; check every 6 hours
+    - cron: '17 * * * *' # hourly; a run that finds nothing new stops after the fetch
   workflow_dispatch:
 
 permissions:
   contents: read
   pages: write
   id-token: write
+  actions: write # only to re-arm this schedule (last step of the build job)
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      deploy: ${{ steps.fresh.outputs.changed }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -29,16 +32,30 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Pull the latest GLERL forecast for Chicago (45198)
-        run: npm run data || echo "::warning::GLERL fetch failed; deploying the committed snapshot"
+        run: npm run data || echo "::warning::GLERL fetch failed; keeping the committed snapshot"
+      - name: Is it newer than what the page already shows?
+        id: fresh
+        run: node scripts/is-fresh.mjs
       - name: Check the simulated water against the forecast
+        if: steps.fresh.outputs.changed == 'true'
         run: npm test
-      - run: npm run build
-      - uses: actions/upload-pages-artifact@v3
+      - if: steps.fresh.outputs.changed == 'true'
+        run: npm run build
+      - if: steps.fresh.outputs.changed == 'true'
+        uses: actions/upload-pages-artifact@v3
         with:
           path: dist
+      # GitHub switches off scheduled workflows in repositories with no activity for 60 days.
+      # Re-enabling the workflow from inside its own run keeps the hourly refresh going.
+      - name: Keep the schedule alive
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/pages.yml/enable" || echo "::warning::could not re-arm the schedule"
 
   deploy:
     needs: build
+    if: needs.build.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

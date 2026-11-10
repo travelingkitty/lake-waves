@@ -575,7 +575,7 @@ for (const e of tagged(t => !!t.building)) {
   if (p.some(([x, y]) => x < G.x0 || y < G.y0 || x > G.x0 + G.nx * G.cell || y > G.y0 + G.ny * G.cell)) continue;
   const t = e.tags;
   let h = parseFloat(t.height);
-  if (!Number.isFinite(h)) h = t['building:levels'] ? parseFloat(t['building:levels']) * 3.3 + 1 : /shed|roof|shelter|kiosk/.test(t.building) ? 3 : 4.5;
+  if (!Number.isFinite(h)) h = t['building:levels'] ? parseFloat(t['building:levels']) * 3.05 + 3 : /shed|roof|shelter|kiosk/.test(t.building) ? 3 : 4.5;
   const i = Math.floor((p[0][0] - G.x0) / G.cell), j = Math.floor((p[0][1] - G.y0) / G.cell);
   const base = Math.max(1.5, elev[idx(Math.min(G.nx - 1, Math.max(0, i)), Math.min(G.ny - 1, Math.max(0, j)))]);
   buildings.push({name: t.name || undefined, h: +h.toFixed(1), base: +base.toFixed(2), p: p.slice(0, -1).map(([x, y]) => [+x.toFixed(1), +y.toFixed(1)])});
@@ -605,7 +605,7 @@ const sky = [];
 for (const e of towers.elements) {
   const t = e.tags || {};
   let h = parseFloat(t.height);
-  if (!Number.isFinite(h) && t['building:levels']) h = parseFloat(t['building:levels']) * 3.2;
+  if (!Number.isFinite(h) && t['building:levels']) h = parseFloat(t['building:levels']) * 3.05 + 3;
   if (!(h >= 40) || !e.center) continue;
   const x = mx(e.center.lon), y = my(e.center.lat);
   const dx = x - CAMERA.x, dy = y - CAMERA.y;

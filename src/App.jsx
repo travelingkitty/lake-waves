@@ -10,7 +10,8 @@ import {SegmentedControl, SegmentedControlItem} from '@astryxdesign/core/Segment
 import {Slider} from '@astryxdesign/core/Slider';
 import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
-import {createWater, sunPosition} from './sim/water.js';
+import {createWater} from './sim/water.js';
+import {celestial} from './sim/astro.js';
 import {components, seaState} from './sim/seaState.js';
 import {FACE, configureBeach, transform} from './sim/surf.js';
 import {LWD, loadGeo, samplers} from './sim/geo.js';
@@ -21,6 +22,14 @@ const STATION = '45198';
 const TZ = 'America/Chicago';
 const HOURS_PER_SECOND = 2; // playback speed; the water itself always runs in real time
 const REPO = 'https://github.com/travelingkitty/lake-waves';
+const CHECK_MS = 10 * 60 * 1000; // how often an open page looks for a newer forecast run
+
+/** The moment (ms) a fractional forecast index points at. */
+const timeAt = (data, f) => {
+  const last = data.time.length - 1;
+  const i = Math.max(0, Math.min(last - 1, Math.floor(f)));
+  return data.time[i] + (data.time[i + 1] - data.time[i]) * (Math.max(0, Math.min(last, f)) - i);
+};
 
 const fmt = (ms, opts) => new Intl.DateTimeFormat('en-US', {timeZone: TZ, ...opts}).format(ms);
 const whenLabel = ms => fmt(ms, {weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric'});
@@ -44,7 +53,7 @@ function thursday(data) {
   if (start < 0) return null;
   let peak = -1;
   for (let i = start; i < Math.min(start + 24, data.time.length); i++) {
-    const light = sunPosition(data.time[i], data.station.lat, data.station.lon).el > 2;
+    const light = celestial(data.time[i], data.station.lat, data.station.lon).el > 2;
     if (light && (peak < 0 || (data.hs.ens[i] ?? 0) > (data.hs.ens[peak] ?? 0))) peak = i;
   }
   return {start, peak: peak < 0 ? start + 12 : peak};
@@ -110,7 +119,15 @@ function Menu({data, level, onHide}) {
         height behind the hook and break on the sandbars once they&apos;re too tall for the depth (about 0.6 × depth). The
         bars are modelled, because Montrose&apos;s bars move from storm to storm.
       </Text>
-      <Text type="supporting">Drag to look around (downtown is behind you) · Space play/pause · ← → step an hour · H hide data</Text>
+      <Text>
+        It&apos;s a painting, not a photograph. The sun, the moon with tonight&apos;s phase, and the stars are where they
+        really are for the hour you pick. The hand gets less steady when it&apos;s cold and blowing, which is when
+        the lake is at its best.
+      </Text>
+      <Text type="supporting">
+        New forecast runs load by themselves: the site rebuilds from GLERL every hour and this page checks every 10 minutes.
+      </Text>
+      <Text type="supporting">Drag to look all the way around (downtown is behind you, to the south) · Space play/pause · ← → step an hour · H hide data</Text>
       <HStack gap={2} wrap="wrap">
         <Button size="sm" label="GLERL wave forecasts" href={data.source.page} target="_blank" rel="noreferrer" />
         <Button size="sm" label="Source on GitHub" href={REPO} target="_blank" rel="noreferrer" />
@@ -128,16 +145,25 @@ export default function App() {
   const [playing, setPlaying] = useState(false);
   const [model, setModel] = useState('ens');
   const [measured, setMeasured] = useState(null);
-  const [hidden, setHidden] = useState(false);
+  const [hidden, setHidden] = useState(() => new URLSearchParams(location.search).get('ui') === '0');
   const [menuOpen, setMenuOpen] = useState(false);
   const [yaw, setYaw] = useState(27);
   const [geo, setGeo] = useState(null);
   const [view, setView] = useState('mat');
+  // Lake level above Low Water Datum (live NOAA gauge, or a typical recent level). Read once
+  // per visit: it moves a centimetre or two a week, and changing it rebuilds the beach.
+  const [level, setLevel] = useState(0.38);
   const canvasRef = useRef(null);
   const markerRef = useRef(null);
   const waterRef = useRef(null);
   const fRef = useRef(0);
   fRef.current = f;
+  const dataRef = useRef(null);
+  dataRef.current = data;
+  const playingRef = useRef(false);
+  playingRef.current = playing;
+  // "Live": the page is showing the present moment and should keep up with the clock.
+  const liveRef = useRef(false);
 
   useEffect(() => {
     fetch(`data/${STATION}.json`)
@@ -147,20 +173,65 @@ export default function App() {
       })
       .then(d => {
         setData(d);
-        // Open on "now" if the run covers it; ?t=thu jumps to the Thursday test case.
-        const want = new URLSearchParams(location.search).get('t');
+        if (d.lakeLevel?.igld85) setLevel(d.lakeLevel.igld85 - LWD);
+        // Open on "now" if the run covers it. ?t=thu jumps to the Thursday test case,
+        // ?h=96 to a forecast hour, ?dh=12 to twelve hours from now.
+        const q = new URLSearchParams(location.search);
         const thu = thursday(d);
-        setF(want === 'thu' && thu ? thu.peak : indexOf(d, Date.now()));
+        const now = indexOf(d, Date.now());
+        const h = parseFloat(q.get('h')), dh = parseFloat(q.get('dh'));
+        let start = now;
+        if (q.get('t') === 'thu' && thu) start = thu.peak;
+        else if (Number.isFinite(h)) start = h;
+        else if (Number.isFinite(dh)) start = now + dh;
+        else liveRef.current = true;
+        setF(Math.max(0, Math.min(d.time.length - 1, start)));
       })
       .catch(e => setError(e.message));
+  }, []);
+
+  // Keep the forecast fresh while the page stays open. The published snapshot is rebuilt
+  // from GLERL on a schedule; when a newer run shows up, swap it in under the same moment.
+  useEffect(() => {
+    let lastCheck = Date.now();
+    const check = async () => {
+      lastCheck = Date.now();
+      const old = dataRef.current;
+      if (!old) return;
+      try {
+        const r = await fetch(`data/${STATION}.json`, {cache: 'no-store'});
+        if (!r.ok) return;
+        const d = await r.json();
+        if (!Array.isArray(d.time) || d.time.length < 2 || !d.hs?.ens) return;
+        const fresh = d.source?.initialized !== old.source?.initialized || d.time[0] !== old.time[0] || d.time.length !== old.time.length;
+        if (!fresh) return;
+        const at = liveRef.current ? Date.now() : timeAt(old, fRef.current);
+        setData(d);
+        setF(indexOf(d, at));
+      } catch {
+        // offline or mid-deploy: keep painting the run we have
+      }
+    };
+    const tick = setInterval(() => {
+      // follow the clock while live
+      if (liveRef.current && !playingRef.current && dataRef.current) setF(indexOf(dataRef.current, Date.now()));
+    }, 60 * 1000);
+    const poll = setInterval(check, CHECK_MS);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && Date.now() - lastCheck > CHECK_MS / 2) check();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(tick);
+      clearInterval(poll);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, []);
 
   useEffect(() => {
     loadGeo().then(setGeo).catch(e => setError(e.message));
   }, []);
 
-  // Lake level above Low Water Datum (live NOAA gauge, or a typical recent level).
-  const level = data?.lakeLevel?.igld85 ? data.lakeLevel.igld85 - LWD : 0.38;
   const ready = Boolean(data && geo);
   const where = useMemo(() => (geo ? samplers(geo) : null), [geo]);
 
@@ -175,15 +246,19 @@ export default function App() {
       return undefined;
     }
     w.onView = setYaw;
-    const v0 = new URLSearchParams(location.search).get('view');
-    if (v0) w.setView(v0);
+    // ?view=hook&yaw=110&pitch=4 opens looking a particular way (for sharing a moment).
+    const q = new URLSearchParams(location.search);
+    const v0 = q.get('view');
+    if (v0) { w.setView(v0); if (v0 === 'mat' || v0 === 'hook') setView(v0); }
+    if (q.has('yaw') || q.has('pitch')) w.look(parseFloat(q.get('yaw')), parseFloat(q.get('pitch')));
     waterRef.current = w;
     return () => w.destroy();
   }, [ready, geo, level]);
 
   const cond = useMemo(() => (data ? conditions(data, f, model) : null), [data, f, model]);
   const sea = useMemo(() => (cond ? seaState(cond) : null), [cond]);
-  const sun = useMemo(() => (cond && data ? sunPosition(cond.time, data.station.lat, data.station.lon) : {az: 180, el: 0}), [cond, data]);
+  // Where the sun, the moon and the stars really are at that hour (sun az/el at the top level).
+  const sun = useMemo(() => (cond && data ? celestial(cond.time, data.station.lat, data.station.lon) : {az: 180, el: 0}), [cond, data]);
 
   // The surf report for the hour (whole hours only, so playback stays light).
   const hour = Math.round(f);
@@ -225,13 +300,13 @@ export default function App() {
   }, [playing, data]);
 
   const thu = useMemo(() => (data ? thursday(data) : null), [data]);
-  const jump = useCallback(i => { setPlaying(false); setF(i); }, []);
+  const jump = useCallback((i, live = false) => { liveRef.current = live; setPlaying(false); setF(i); }, []);
 
   // Keyboard: space play/pause, H hide data, ←/→ hour.
   useEffect(() => {
     const onKey = e => {
       if (e.target !== document.body) return;
-      if (e.key === ' ') { e.preventDefault(); setPlaying(p => !p); }
+      if (e.key === ' ') { e.preventDefault(); liveRef.current = false; setPlaying(p => !p); }
       else if (e.key === 'h' || e.key === 'H') setHidden(h => !h);
       else if (data && e.key === 'ArrowRight') jump(Math.min(data.time.length - 1, Math.floor(fRef.current) + 1));
       else if (data && e.key === 'ArrowLeft') jump(Math.max(0, Math.ceil(fRef.current) - 1));
@@ -349,9 +424,10 @@ export default function App() {
                   icon={playing ? <PauseIcon width={14} /> : <PlayIcon width={14} />}
                   onClick={() => {
                     if (!playing && f >= data.time.length - 1.01) setF(0);
+                    liveRef.current = false;
                     setPlaying(p => !p);
                   }} />
-                <Button size="sm" label="Now" onClick={() => jump(nowIndex)} isDisabled={nowIndex <= 0 || nowIndex >= data.time.length - 1} />
+                <Button size="sm" label="Now" onClick={() => jump(nowIndex, true)} isDisabled={nowIndex <= 0 || nowIndex >= data.time.length - 1} />
                 {thu && <Button size="sm" label={`Thursday ${fmt(data.time[thu.peak], {hour: 'numeric'})}`} tooltip="Jump to Thursday's biggest daylight surf" onClick={() => jump(thu.peak)} />}
                 <Text weight="semibold" hasTabularNumbers>
                   {sun.el > 0 ? '☀' : '☾'} {whenLabel(cond.time)} CT
@@ -372,7 +448,7 @@ export default function App() {
               )}
 
               <ForecastChart data={data} f={f} model={model} nowIndex={nowIndex}
-                onScrub={i => { setPlaying(false); setF(i); }} />
+                onScrub={i => jump(i)} />
 
               <Slider label="Forecast hour" isLabelHidden valueDisplay="none" width="100%"
                 min={0} max={data.time.length - 1} step={1} value={Math.round(f)}

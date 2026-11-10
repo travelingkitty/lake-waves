@@ -2,21 +2,16 @@
 
 **Live:** https://travelingkitty.github.io/lake-waves/ · Thursday test case: [`?t=thu`](https://travelingkitty.github.io/lake-waves/?t=thu)
 
-The whole page is a surf cam at **Montrose Beach, Chicago**. You stand at the water's edge
-off the beach mat (Surfline's lineup marker) or out on the hook. The geography is
-built by `npm run geo` (`scripts/build-montrose.mjs`):
+A moving painting of **Montrose Beach, Chicago**, and a surf forecast. You stand at the
+water's edge off the beach mat (Surfline's lineup marker) or out on the hook, and you can
+turn the full 360°. The lake in front of you is NOAA GLERL's experimental wave forecast,
+hour by hour: the same data the [GLERL WW3 page](https://www.glerl.noaa.gov/emf/waves/WW3/?pg=ww3)
+plots when you click the Chicago Buoy. Offshore, the water is the forecast. At the beach,
+the same waves shoal, bend and break. The numbers stay out of the way under a small
+[Astryx](https://github.com/meta/astryx) menu.
 
-- **OpenStreetMap:** the shoreline, beach, dunes, the hook and its light, buildings and trees.
-- **NOAA NCEI:** bathymetry.
-- **Towers:** real heights for Edgewater and downtown.
-
-The surf-zone sandbars are modelled, because Montrose's bars move. The lake level is
-NOAA's live Calumet Harbor gauge. The lake is drawn live in WebGL and driven hour by hour by
-NOAA GLERL's experimental wave forecast, the same data the
-[GLERL WW3 page](https://www.glerl.noaa.gov/emf/waves/WW3/?pg=ww3) plots when you
-click the Chicago Buoy. Offshore, the water is the forecast. At the beach, the same
-waves shoal, bend and break, and a label marks where. The numbers float on top in a
-few small [Astryx](https://github.com/meta/astryx) panels.
+It started from a photo: a sunrise surf session on the lake on a freezing morning. The
+page is painted the way that morning felt.
 
 ```bash
 npm install
@@ -24,11 +19,27 @@ npm run data      # pull the latest GLERL run for Chicago (45198) → public/dat
 npm test          # check the simulated water against the forecast (see below)
 npm run dev       # http://localhost:5173  (add ?t=thu to open on Thursday's peak)
 npm run build     # static site in dist/ — host anywhere
+npm run geo       # rebuild Montrose from OpenStreetMap and NOAA (rarely needed)
 ```
 
-GLERL runs twice a day (00Z and 12Z). Re-run `npm run data` to refresh. GLERL
-doesn't send CORS headers, so the browser can't fetch it directly. The script
-saves a small (≈18 KB) JSON snapshot instead. Other stations: `npm run data -- 45174`.
+## The forecast keeps itself current
+
+GLERL posts a new run twice a day (00Z and 12Z) and sends no CORS headers, so a browser
+can't read it directly. Instead:
+
+1. **Every hour** the GitHub Actions workflow (`.github/workflows/pages.yml`) runs
+   `npm run data` and then `scripts/is-fresh.mjs`, which compares the run it just pulled
+   with the one the live page is serving.
+2. **Only if GLERL has posted something new** does it run `npm test`, build and deploy.
+   A failed fetch, or an older run, never replaces a newer one.
+3. **An open page** re-reads its own `data/45198.json` every 10 minutes and when the tab
+   regains focus. A newer run is swapped in under you, at the same moment in time.
+
+GitHub pauses scheduled workflows after 60 days without repository activity. The
+workflow's last step re-enables its own schedule to prevent that; if the page ever stops
+updating, open the Actions tab and re-enable the workflow.
+
+Other stations: `npm run data -- 45174`.
 
 ## Where the data comes from
 
@@ -43,6 +54,44 @@ Plotly figure behind the buoy popup on the GLERL page. It keeps, hourly for 10 d
 | `hs.ww3` | WAVEWATCH III, HRRR+GFS winds (≈3 days) |
 | `wind.gefs`, `wind.hrrr` | wind speed (mph) and compass direction it blows from |
 
+The lake level is NOAA's live Calumet Harbor gauge.
+
+## The place
+
+`npm run geo` (`scripts/build-montrose.mjs`) builds the beach from survey data and writes
+`public/montrose/geo.bin` and `scene.json`:
+
+- **OpenStreetMap:** the shoreline, beach, dunes, the hook and its light, 830 nearby
+  buildings and 1,382 trees.
+- **NOAA NCEI:** bathymetry.
+- **Skyline:** 160 towers, each at its true compass bearing, distance and height as seen
+  from the sand: downtown due south (875 N Michigan, Trump Tower, Willis), Uptown to the
+  west, the Edgewater towers up the shore to the north-west. Where OpenStreetMap has only
+  a floor count, height is taken as 3.05 m a floor plus 3 m.
+
+The surf-zone sandbars are modelled, because Montrose's bars move.
+
+## The sky
+
+`src/sim/astro.js` and `src/sim/light.js` place everything for the forecast hour at
+Chicago: the sun, the moon with its true phase, and the stars, which turn with sidereal
+time and so rise and set through the night with the Milky Way. Nights are lit brighter
+than they are, on purpose, so you can still read the waves in the dark.
+
+## The painting
+
+The scene is rendered in HDR and then painted (`src/sim/post.js`, shaders in
+`src/sim/glsl/`): a Kuwahara brush, bloom, a planar reflection of the sky in the water,
+a filmic shoulder and canvas weave. The painter has flaws, and they are deliberate:
+
+- **Cold hands.** The brush trembles in beats. It gets worse with the wind and in the dark.
+- **Underpainting.** The canvas was toned burnt sienna first, and it still grins through
+  the thin darks and through flecks the brush skipped.
+- **Impasto.** The lights are laid on thick and catch a little relief.
+- **Unfinished edges.** Strokes stop short of the edge of the canvas, where the brush ran dry.
+
+None of this touches the wave geometry. The water under the paint is still the forecast.
+
 ## How the water follows the forecast
 
 All of it is in `src/sim/seaState.js`, shared by the renderer and the test:
@@ -56,8 +105,7 @@ All of it is in `src/sim/seaState.js`, shared by the renderer and the test:
 - **Speed.** Each wave moves at its deep-water speed (ω² = gk), in real time.
 - **Roughness and whitecaps.** Ripple slope comes from the Cox–Munk law for the wind
   speed. Whitecaps start around 7 mph and are plentiful by 19–24 mph (Beaufort 5).
-- **Sky.** The sun is placed for the forecast hour at Chicago, and the cloud deck darkens
-  and drifts with the wind.
+- **Weather.** The cloud deck darkens and drifts with the wind.
 
 On screen, the **virtual buoy** measures wave height off the rendered surface
 every 0.4 s. The badge turns green when it matches the forecast.
@@ -95,5 +143,15 @@ table contains a non-finite value.
 
 ## Controls
 
-Drag the water to look around. The menu (top-left) has sources and settings.
+Drag to look around. The menu (top-left) has sources and settings.
 **Space** plays or pauses, **← →** step an hour, **H** hides the data.
+
+Links can open on a particular moment and view:
+
+| Parameter | Meaning |
+|---|---|
+| `t=thu` | open on the peak of the next Thursday event |
+| `h=97.5` | open that many hours into the forecast run |
+| `view=mat`, `view=hook`, `view=top` | stand at the beach mat, on the hook, or look from above |
+| `yaw=180&pitch=5` | compass direction to face and tilt, in degrees |
+| `ui=0` | the painting alone, no interface |

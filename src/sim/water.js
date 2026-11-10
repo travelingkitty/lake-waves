@@ -15,106 +15,33 @@
 
 import {approach, components, measureHs, N_WAVES} from './seaState.js';
 import {D0, GAMMA, TW, transform} from './surf.js';
+import {lighting} from './light.js';
+import {STARS, starFrame} from './astro.js';
+import {createPost, REFL_UNIT} from './post.js';
+import COMMON from './glsl/common.glsl?raw';
+import SKY_SRC from './glsl/sky.glsl?raw';
+import SURF_SRC from './glsl/surf_fs.glsl?raw';
+import SOLID_SRC from './glsl/solid_fs.glsl?raw';
+import TREE_SRC from './glsl/tree_fs.glsl?raw';
 
 const GX = 240;
 const GY = 170;
 
 const R = Math.PI / 180;
+const TAU = Math.PI * 2;
 
-const COMMON = /* glsl */ `
-uniform vec3 uSunDir;
-uniform vec3 uSunColor;
-uniform float uSunVis;
-uniform vec3 uZenith;
-uniform vec3 uHorizon;
-uniform float uCover;
-uniform vec3 uCloud;
-uniform float uDay;
-uniform float uFogDist;
-
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float noise(vec2 p) {
-  vec2 i = floor(p), f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(hash(i), hash(i + vec2(1, 0)), f.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), f.x), f.y);
-}
-vec3 skyBase(vec3 d) {
-  float y = max(d.y, 0.0);
-  vec3 c = mix(uHorizon, uZenith, pow(y, 0.55));
-  float s = max(dot(d, uSunDir), 0.0);
-  c += uSunColor * (0.28 * pow(s, 5.0) + 0.6 * pow(s, 60.0)) * (0.35 + 0.65 * uSunVis);
-  c += uSunColor * 6.0 * pow(s, 1800.0) * uSunVis;
-  return c;
-}
-vec3 skyRefl(vec3 d) {
-  vec3 c = skyBase(d);
-  return mix(c, uCloud * 0.9, uCover * 0.75 * smoothstep(0.0, 0.25, d.y));
-}
-vec3 fogged(vec3 col, vec3 toCam, float dist) {
-  float fog = 1.0 - exp(-pow(dist / uFogDist, 1.25));
-  vec3 V = toCam / dist;
-  return mix(col, skyRefl(normalize(vec3(-V.x, 0.012, -V.z))), fog);
-}
-`;
+// Fragment shaders live in ./glsl (the look); the vertex shaders below are the physics.
+const HEAD = '#version 300 es\nprecision highp float;\n';
+// Reflect the world in the water plane (y = 0).
+const MIRROR = new Float32Array([1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
 const SKY_VS = /* glsl */ `#version 300 es
 in vec2 aPos;
 out vec2 vNdc;
 void main() { vNdc = aPos; gl_Position = vec4(aPos, 0.9999, 1.0); }`;
 
-const skyFs = nTowers => /* glsl */ `#version 300 es
-precision highp float;
-in vec2 vNdc;
-out vec4 outColor;
-uniform mat4 uInvViewProj;
-uniform vec3 uCam;
-uniform float uTime;
-uniform vec2 uWindTo;
-uniform float uWindMs;
-uniform vec4 uTowers[${nTowers}]; // bearing°, half-width°, top°, distance m
-${COMMON}
-
-float fbm(vec2 p) {
-  float a = 0.5, s = 0.0;
-  for (int i = 0; i < 5; i++) { s += a * noise(p); p = p * 2.03 + 17.1; a *= 0.5; }
-  return s;
-}
-
-// Real towers (OpenStreetMap heights): Edgewater up the shore, downtown to the south.
-vec3 skyline(vec3 d, vec3 c) {
-  float e = degrees(asin(clamp(d.y, -1.0, 1.0)));
-  if (e > 6.0 || e < -0.3) return c;
-  float b = mod(degrees(atan(d.x, -d.z)) + 360.0, 360.0);
-  float best = 1e9;
-  float id = -1.0;
-  for (int i = 0; i < ${nTowers}; i++) {
-    vec4 t = uTowers[i];
-    if (t.w <= 0.0) continue;
-    float db = abs(mod(b - t.x + 540.0, 360.0) - 180.0);
-    if (db < t.y && e < t.z && t.w < best) { best = t.w; id = float(i) + db / max(t.y, 1e-4) * 0.5; }
-  }
-  if (id < 0.0) return c;
-  float vis = max(0.5 + 0.2 * uDay, exp(-best / (uFogDist * 6.0)));
-  vec3 body = mix(c * 0.62, vec3(0.2, 0.21, 0.24) * (0.3 + 0.7 * uDay), 0.55);
-  vec2 cell = vec2(b * 55.0, e * 60.0);
-  float lit = step(0.58, hash(floor(cell) + floor(id))) * step(0.25, fract(cell.x)) * step(0.3, fract(cell.y));
-  body += vec3(1.0, 0.82, 0.55) * lit * 0.6 * (1.0 - uDay);
-  return mix(c, body, vis);
-}
-
-void main() {
-  vec4 w = uInvViewProj * vec4(vNdc, 1.0, 1.0);
-  vec3 d = normalize(w.xyz / w.w - uCam);
-  vec3 c = skyBase(d);
-  if (d.y > 0.0) {
-    vec2 uv = d.xz / (d.y + 0.06) * 0.9 + uWindTo * uTime * (0.002 + 0.0009 * uWindMs);
-    float n = fbm(uv * 1.6);
-    float m = smoothstep(1.0 - uCover, 1.0 - uCover + 0.35, n);
-    float shade = mix(1.05, 0.62, smoothstep(0.35, 0.9, n));
-    c = mix(c, uCloud * shade, m * smoothstep(0.0, 0.08, d.y));
-  }
-  outColor = vec4(skyline(d, c), 1.0);
-}`;
+const NS = STARS.length;
+const skyFs = n => HEAD + '#define NT ' + n + '\n#define NS ' + NS + '\n' + COMMON + SKY_SRC;
 
 const SURF_VS = /* glsl */ `#version 300 es
 precision highp float;
@@ -272,137 +199,7 @@ void main() {
   gl_Position = uViewProj * vec4(world, 1.0);
 }`;
 
-const SURF_FS = /* glsl */ `#version 300 es
-precision highp float;
-in vec3 vWorld;
-in vec3 vNormal;
-in float vEta;
-in float vH;
-in float vThick;
-in float vGround;
-in float vFoam;
-in float vHs;
-in float vD;
-in float vS;
-in float vShelter;
-in float vCap;
-flat in int vMat;
-out vec4 outColor;
-uniform vec3 uCam;
-uniform float uTime;
-uniform vec2 uWindTo;
-uniform float uMicro;
-uniform float uFoamWind;
-uniform vec3 uDeepCol;
-uniform vec3 uScatter;
-uniform vec3 uAmbient;
-uniform float uRunup;
-uniform float uDrift;
-uniform vec2 uTng;
-${COMMON}
-
-void main() {
-  vec3 toCam = uCam - vWorld;
-  float dist = length(toCam);
-  vec3 V = toCam / dist;
-  vec3 sunL = uSunColor * uSunVis;
-  vec3 col;
-
-  if (vThick <= 0.0) {
-    // --- land ---------------------------------------------------------------
-    vec3 n = normalize(vNormal);
-    vec2 q = vWorld.xz;
-    float grain = noise(q * 1.9) * noise(q * 0.21);
-    vec3 albedo;
-    float wet = 0.0;
-    if (vMat == 0) {
-      // lakebed bared in a wave trough: wet sand
-      albedo = vec3(0.47, 0.42, 0.34) * (0.86 + 0.28 * grain);
-      wet = 1.0;
-    } else if (vMat == 1 || vMat == 2) {
-      // Montrose sand: pale tan; wet and darker where the swash reaches.
-      albedo = vec3(0.88, 0.81, 0.67) * (0.86 + 0.28 * grain);
-      wet = (1.0 - smoothstep(uRunup * 1.25, uRunup * 1.25 + 0.3, vGround)) * step(vD, 0.5) * step(-40.0, vD);
-      albedo = mix(albedo, vec3(0.47, 0.42, 0.34), wet * 0.85);
-      if (vMat == 2) {
-        // dune grass (marram, gone golden-tan by November) in clumps
-        float clump = smoothstep(0.42, 0.62, noise(q * 0.35) * 0.7 + noise(q * 2.1) * 0.3);
-        albedo = mix(albedo, vec3(0.6, 0.52, 0.33) * (0.75 + 0.5 * noise(q * 6.0)), clump * 0.85);
-      }
-    } else if (vMat == 3) {
-      albedo = vec3(0.34, 0.37, 0.22) * (0.8 + 0.4 * grain);           // November park grass
-    } else if (vMat == 5) {
-      albedo = vec3(0.30, 0.26, 0.19) * (0.75 + 0.5 * grain);          // leaf litter under trees
-    } else if (vMat == 7) {
-      float blocks = step(0.06, fract(q.x * 0.33)) * step(0.06, fract(q.y * 0.33));
-      albedo = vec3(0.64, 0.63, 0.6) * (0.82 + 0.18 * blocks) * (0.9 + 0.2 * grain); // the hook: concrete & stone
-    } else {
-      albedo = vec3(0.43, 0.43, 0.42) * (0.85 + 0.3 * grain);           // paths, lots, city
-    }
-    col = albedo * (uAmbient + sunL * max(dot(n, uSunDir), 0.0));
-    vec3 R = reflect(-V, n);
-    col += wet * skyRefl(R) * (0.03 + 0.45 * pow(clamp(1.0 - dot(n, V), 0.0, 1.0), 5.0));
-  } else {
-    // --- water --------------------------------------------------------------
-    float foot = max(length(fwidth(vWorld.xz)), 1e-3);
-    vec2 across = vec2(-uWindTo.y, uWindTo.x);
-    vec2 q = vec2(dot(vWorld.xz, uWindTo), dot(vWorld.xz, across));
-    vec2 grad = vec2(0.0);
-    float resolved = 0.0;
-    float calm = 0.35 + 0.65 * vShelter;
-    for (int j = 0; j < 3; j++) {
-      float L = 3.2 * pow(0.345, float(j));
-      float sc = 6.2831853 / L;
-      float amp = uMicro * calm * 0.38 / sc * (1.0 - smoothstep(0.25, 1.0, foot / L));
-      resolved += (amp * sc) * (amp * sc);
-      vec2 uv = vec2(q.x * sc, q.y * sc * 0.6) - vec2(uTime * sqrt(9.81 * sc) * 0.9, 0.0) + float(j) * 31.7;
-      float e = 0.15;
-      float h0 = noise(uv);
-      vec2 g = vec2((noise(uv + vec2(e, 0.0)) - h0) / e * sc, (noise(uv + vec2(0.0, e)) - h0) / e * sc * 0.6) * amp;
-      grad += uWindTo * g.x + across * g.y;
-    }
-    vec3 N = normalize(normalize(vNormal) + vec3(-grad.x, 0.0, -grad.y));
-    float rough = clamp(uMicro * uMicro - resolved * 0.5, 0.0, 1.0);
-
-    vec3 R = reflect(-V, N);
-    R.y = abs(R.y);
-    vec3 refl = mix(skyRefl(R), skyRefl(normalize(vec3(R.x, R.y + 0.35, R.z))), clamp(rough * 8.0, 0.0, 0.7));
-    float F = 0.02 + 0.98 * pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 5.0);
-
-    float hsLocal = max(vHs, 0.03);
-    float crest = clamp(vEta / (hsLocal * 0.5), -1.5, 2.5);
-    vec3 body = mix(uDeepCol, uScatter, clamp(0.25 + 0.35 * crest, 0.0, 1.0));
-    float back = pow(clamp(dot(-V, uSunDir) * 0.5 + 0.5, 0.0, 1.0), 3.0);
-    body += uScatter * 0.6 * back * clamp(crest, 0.0, 1.0) * uSunVis;
-    float clarity = exp(-max(vThick, 0.0) / 1.2);
-    vec3 bottom = vec3(0.6, 0.55, 0.44) * (uAmbient + sunL * 0.7);
-    body = mix(body, mix(bottom, uScatter * 2.2, 0.35), clarity * 0.8);
-    col = mix(body, refl, F * (1.0 - 0.5 * clarity));
-    float spec = pow(max(dot(R, uSunDir), 0.0), mix(900.0, 120.0, clamp(rough * 30.0, 0.0, 1.0)));
-    col += uSunColor * spec * 3.0 * uSunVis;
-
-    // Foam ---------------------------------------------------------------
-    float lip = smoothstep(0.32, 0.48, vEta / max(vH, 0.05)) * step(0.0, vD) * (1.0 - smoothstep(5.0, 8.0, vH)) * step(0.05, vHs);
-    // Broken waves are whiter where the local bar is forcing the break (cap < 1)
-    // and break in sections along the crest rather than as one even line.
-    float sections = 0.55 + 0.45 * smoothstep(0.3, 0.7, noise(vec2(vS * 0.035, vD * 0.02 - uTime * 0.05)));
-    float forced = mix(0.6, 1.0, smoothstep(0.98, 0.7, vCap));
-    float bore = vFoam * smoothstep(-0.2, 0.45, crest) * sections * forced;
-    vec2 flow = vec2(vS - uDrift * uTime, vD + 1.3 * uTime);
-    float lace = vFoam * smoothstep(0.5, 0.78, noise(flow * 0.32) * 0.6 + noise(flow * 1.25) * 0.4);
-    float edge = (1.0 - smoothstep(0.02, 0.2, vThick)) * (1.0 - step(25.0, vD)) * step(0.15, vShelter);
-    vec2 drift = uWindTo * uTime * 1.2;
-    float groups = noise((vWorld.xz - drift) * 0.045) * 0.65 + noise((vWorld.xz - drift) * 0.11) * 0.35;
-    float wc = uFoamWind * smoothstep(1.15 - 0.6 * uFoamWind, 1.6 - 0.6 * uFoamWind, crest)
-      * smoothstep(0.6 - 0.2 * uFoamWind, 0.76 - 0.18 * uFoamWind, groups) * step(4.0, vH) * vShelter;
-    float tear = noise(vWorld.xz * 0.9 + vec2(uTime * 0.4, 0.0)) * 0.6 + noise(vWorld.xz * 3.1) * 0.4;
-    float surf = max(max(lip, bore * 0.9), max(lace * 0.75, edge * 0.85));
-    float foam = max(surf * smoothstep(0.15, 0.55, tear + 0.3 * surf), wc * smoothstep(0.3, 0.7, tear));
-    vec3 foamCol = vec3(0.93, 0.95, 0.96) * (uAmbient * 1.35 + sunL * max(dot(N, uSunDir), 0.0) * 0.9 + 0.03);
-    col = mix(col, foamCol, clamp(foam, 0.0, 0.97));
-  }
-  outColor = vec4(fogged(col, toCam, dist), 1.0);
-}`;
+const SURF_FS = HEAD + COMMON + SURF_SRC;
 
 // Buildings and the light: lit boxes with windows that come on at night.
 const SOLID_VS = /* glsl */ `#version 300 es
@@ -415,49 +212,7 @@ out vec3 vN;
 out vec3 vInfo;
 void main() { vPos = aPos; vN = aNormal; vInfo = aInfo; gl_Position = uViewProj * vec4(aPos, 1.0); }`;
 
-const SOLID_FS = /* glsl */ `#version 300 es
-precision highp float;
-in vec3 vPos;
-in vec3 vN;
-in vec3 vInfo;
-out vec4 outColor;
-uniform vec3 uCam;
-uniform vec3 uAmbient;
-uniform float uTime;
-${COMMON}
-void main() {
-  vec3 n = normalize(vN);
-  float seed = vInfo.z;
-  vec3 albedo = mix(vec3(0.55, 0.5, 0.45), vec3(0.72, 0.68, 0.62), fract(seed * 7.13));
-  albedo = mix(albedo, vec3(0.45, 0.3, 0.24), step(0.7, fract(seed * 3.7)));     // brick
-  vec3 col;
-  if (vInfo.y > 2.5) {
-    // concrete deck and limestone blocks of the hook and the harbor walls
-    vec2 q = vPos.xz;
-    float joint = step(0.97, fract(q.x * 0.31 + q.y * 0.07)) + step(0.97, fract(q.y * 0.31 - q.x * 0.07));
-    albedo = mix(vec3(0.66, 0.65, 0.62), vec3(0.58, 0.56, 0.52), step(0.5, vInfo.z)) * (1.0 - 0.12 * min(joint, 1.0)) * (0.88 + 0.24 * noise(q * 0.9));
-    float wetLine = (1.0 - smoothstep(-0.4, 0.9, vPos.y)) * step(0.5, vInfo.z);
-    albedo *= 1.0 - 0.45 * wetLine;
-    col = albedo * (uAmbient + uSunColor * uSunVis * max(dot(n, uSunDir), 0.0));
-  } else if (vInfo.y > 1.5) {
-    // the Wilson Avenue breakwater light (Montrose hook): white tower, flashing at night
-    albedo = vec3(0.9);
-    col = albedo * (uAmbient + uSunColor * uSunVis * max(dot(n, uSunDir), 0.0));
-    float flash = step(0.86, fract(uTime / 4.0)) * (1.0 - uDay);
-    col += vec3(1.0, 0.95, 0.85) * flash * step(vPos.y, 9.6) * step(8.6, vPos.y) * 4.0;
-  } else {
-    col = albedo * (uAmbient * 0.9 + uSunColor * uSunVis * max(dot(n, uSunDir), 0.0));
-    if (vInfo.y < 0.5) {
-      vec2 w = vec2(vInfo.x / 3.2, vPos.y / 3.3);
-      float win = step(0.25, fract(w.x)) * step(0.35, fract(w.y)) * step(1.0, vPos.y);
-      col = mix(col, col * 0.55 + uZenith * 0.25, win * 0.6);
-      float lit = step(0.55, hash(floor(w) + seed * 13.0)) * win * (1.0 - uDay);
-      col += vec3(1.0, 0.8, 0.5) * lit * 0.55;
-    }
-  }
-  vec3 toCam = uCam - vPos;
-  outColor = vec4(fogged(col, toCam, length(toCam)), 1.0);
-}`;
+const SOLID_FS = HEAD + COMMON + SOLID_SRC;
 
 // Trees: billboards with bare November crowns (most leaves are down by now).
 const TREE_VS = /* glsl */ `#version 300 es
@@ -480,29 +235,7 @@ void main() {
   gl_Position = uViewProj * vec4(pos, 1.0);
 }`;
 
-const TREE_FS = /* glsl */ `#version 300 es
-precision highp float;
-in vec2 vUv;
-in vec3 vPos;
-in float vSeed;
-out vec4 outColor;
-uniform vec3 uCam;
-uniform vec3 uAmbient;
-${COMMON}
-void main() {
-  vec2 p = vec2(vUv.x, vUv.y);
-  float trunk = step(abs(p.x), 0.025 + 0.02 * (1.0 - p.y)) * step(p.y, 0.45);
-  vec2 c = (p - vec2(0.0, 0.62)) / vec2(0.46, 0.38);
-  float crown = 1.0 - smoothstep(0.75, 1.0, length(c));
-  // branch-like structure: stretched noise reads as twigs at a distance
-  float twigs = noise(vec2(p.x * 26.0 + vSeed * 40.0, p.y * 11.0)) * 0.6 + noise(p * 61.0 + vSeed * 9.0) * 0.4;
-  float a = max(trunk, crown * step(0.56, twigs));
-  if (a < 0.5) discard;
-  vec3 albedo = mix(vec3(0.2, 0.18, 0.16), vec3(0.38, 0.3, 0.2), step(0.85, fract(vSeed * 5.3)) * crown); // a few oaks hold brown leaves
-  vec3 col = albedo * (uAmbient * 1.1 + uSunColor * uSunVis * 0.4);
-  vec3 toCam = uCam - vPos;
-  outColor = vec4(fogged(col, toCam, length(toCam)), 1.0);
-}`;
+const TREE_FS = HEAD + COMMON + TREE_SRC;
 
 function compile(gl, type, src) {
   const s = gl.createShader(type);
@@ -585,29 +318,6 @@ export const toWorld = (bearingDeg, elevDeg = 0) => {
   return [Math.sin(b) * Math.cos(e), Math.sin(e), -Math.cos(b) * Math.cos(e)];
 };
 
-/** Sky + light for a sun elevation (rad) and a 0..1 storminess. */
-function lighting(sunDir, storm) {
-  const el = Math.asin(sunDir[1]);
-  const day = smooth(-0.1, 0.12, el);
-  const twilight = smooth(-0.14, 0, el) * (1 - smooth(0.02, 0.22, el));
-  let zenith = mix([0.36, 0.5, 0.64], [0.27, 0.31, 0.35], storm);
-  let horizon = mix([0.68, 0.74, 0.78], [0.5, 0.53, 0.55], storm);
-  horizon = mix(horizon, [0.85, 0.5, 0.32], twilight * 0.8 * (1 - storm * 0.5));
-  // Night over Chicago is never black: the city lights the cloud deck from below.
-  const glow = 0.45 + 0.55 * storm;
-  zenith = mix(mix([0.03, 0.04, 0.068], [0.1, 0.088, 0.09], glow), zenith, day);
-  horizon = mix(mix([0.1, 0.1, 0.12], [0.24, 0.18, 0.15], glow), horizon, Math.max(day, twilight * 0.6));
-  const sunColor = mix([1.0, 0.5, 0.25], [1.0, 0.93, 0.82], smooth(0.02, 0.35, el)).map(v => v * day);
-  const light = 0.32 + 0.68 * day;
-  return {
-    day, zenith, horizon, sunColor,
-    sunVis: day * (1 - storm * 0.85),
-    ambient: zenith.map((v, i) => v * 0.55 + horizon[i] * 0.45),
-    cloud: mix(mix([0.08, 0.08, 0.1], [0.17, 0.14, 0.13], glow), mix([0.78, 0.8, 0.82], [0.42, 0.44, 0.46], storm), Math.max(day, twilight * 0.5)),
-    deep: [0.008, 0.045, 0.058].map(v => v * light + 0.004),
-    scatter: [0.04, 0.19, 0.18].map(v => v * light + 0.004),
-  };
-}
 
 /** Sun azimuth/elevation (degrees) for a time and place. */
 export function sunPosition(ms, lat, lon) {
@@ -722,7 +432,7 @@ function buildSolids(scene, level) {
  *   level: lake level above Low Water Datum (m).
  */
 export function createWater(canvas, {geo, level, onMeasure, marker}) {
-  const gl = canvas.getContext('webgl2', {antialias: true, alpha: false, powerPreference: 'high-performance'});
+  const gl = canvas.getContext('webgl2', {antialias: false, alpha: false, powerPreference: 'high-performance'});
   if (!gl) throw new Error('WebGL2 is not available in this browser.');
   const H = geo.header;
   const scene = geo.scene;
@@ -733,6 +443,8 @@ export function createWater(canvas, {geo, level, onMeasure, marker}) {
   const surf = program(gl, SURF_VS, SURF_FS);
   const solid = program(gl, SOLID_VS, SOLID_FS);
   const tree = program(gl, TREE_VS, TREE_FS);
+  const post = createPost(gl);
+  let paint = 0.8;
 
   // Sky triangle
   const skyVao = gl.createVertexArray();
@@ -844,6 +556,15 @@ export function createWater(canvas, {geo, level, onMeasure, marker}) {
   let tau = 0.8;
   let sunTarget = toWorld(180, 20);
   let sun = [...sunTarget];
+  // The moon and the star dome (sidereal time + latitude), eased like the sun so playback glides.
+  let moonTarget = toWorld(200, -30);
+  let moon = [...moonTarget];
+  let moonLit = 0.5;
+  let lstTarget = 0;
+  let lst = 0;
+  let latR = 41.9655 * R;
+  const starU = new Float32Array(NS * 4);
+  const starWarm = Float32Array.from(STARS, s => s.warm);
   let yaw = view.yaw;
   let pitch = view.pitch;
   const phases = new Float64Array(N_WAVES);
@@ -868,6 +589,7 @@ export function createWater(canvas, {geo, level, onMeasure, marker}) {
     const w = Math.round(canvas.clientWidth * dpr);
     const h = Math.round(canvas.clientHeight * dpr);
     if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    post.resize(Math.max(2, w), Math.max(2, h));
   }
   const changed = (a, b) => !b || Math.abs(a.hs - b.hs) > 0.004 || Math.abs(a.tp - b.tp) > 0.004
     || Math.abs(((a.towardDeg - b.towardDeg + 540) % 360) - 180) > 0.15;
@@ -881,9 +603,19 @@ export function createWater(canvas, {geo, level, onMeasure, marker}) {
     resize();
 
     cur = approach(cur, target, dt, tau);
-    sun = mix(sun, sunTarget, 1 - Math.exp(-dt / Math.min(tau, 0.3)));
+    const ease = 1 - Math.exp(-dt / Math.min(tau, 0.3));
+    sun = mix(sun, sunTarget, ease);
     const sl = Math.hypot(...sun);
     const sunDir = sun.map(v => v / sl);
+    moon = mix(moon, moonTarget, ease);
+    const ml = Math.hypot(...moon) || 1;
+    const moonDir = moon.map(v => v / ml);
+    lst += (((lstTarget - lst) % TAU + TAU + Math.PI) % TAU - Math.PI) * ease;
+    const starM = starFrame(lst, latR);
+    STARS.forEach((s, i) => {
+      for (let r = 0; r < 3; r++) starU[i * 4 + r] = starM[r * 3] * s.e[0] + starM[r * 3 + 1] * s.e[1] + starM[r * 3 + 2] * s.e[2];
+      starU[i * 4 + 3] = s.b;
+    });
 
     const comps = components(cur);
     if (!phasesInit) { comps.forEach((c, i) => (phases[i] = -c.phase0)); phasesInit = true; }
@@ -907,7 +639,7 @@ export function createWater(canvas, {geo, level, onMeasure, marker}) {
     const micro = Math.sqrt(Math.max(0.002, 0.003 + 5.12e-3 * cur.windMs - slopeVar));
     const foamWind = smooth(7, 24, cur.windMph);
     const storm = Math.min(1, smooth(6, 26, cur.windMph) * 0.8 + smooth(1, 5, cur.hsFt) * 0.35);
-    const L = lighting(sunDir, storm);
+    const L = lighting(sunDir, storm, {dir: moonDir, lit: moonLit});
     const windTo = toWorld(cur.towardDeg);
     const fogDist = view === VIEWS.top ? 1e7 : 4200 - 2400 * storm;
     const from = (cur.towardDeg + 180) % 360;
@@ -926,36 +658,70 @@ export function createWater(canvas, {geo, level, onMeasure, marker}) {
     const hy = transformPoint(viewProj, [eye[0] + hz[0] * 30000, 0, eye[2] + hz[2] * 30000]);
     const yTop = hy[2] > 0 ? Math.min(1.05, hy[1] + 0.03) : 1.05;
 
-    gl.viewport(0, 0, canvas.width, canvas.height);
-    gl.clearColor(0, 0, 0, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
     const shared = u => {
       gl.uniform3fv(u.uSunDir, sunDir);
       gl.uniform3fv(u.uSunColor, L.sunColor);
       gl.uniform1f(u.uSunVis, L.sunVis);
+      gl.uniform3fv(u.uMoonDir, moonDir);
+      gl.uniform3fv(u.uMoonColor, L.moonColor);
       gl.uniform3fv(u.uZenith, L.zenith);
       gl.uniform3fv(u.uHorizon, L.horizon);
-      gl.uniform1f(u.uCover, 0.45 + 0.5 * storm);
+      gl.uniform3fv(u.uGlow, L.glow);
+      gl.uniform3fv(u.uVenus, L.venus);
+      gl.uniform3fv(u.uCity, L.city);
+      gl.uniform1f(u.uCover, L.cover);
       gl.uniform3fv(u.uCloud, L.cloud);
+      gl.uniform3fv(u.uCloudDark, L.cloudDark);
       gl.uniform1f(u.uDay, L.day);
       gl.uniform1f(u.uFogDist, fogDist);
       gl.uniform3fv(u.uCam, eye);
       gl.uniform1f(u.uTime, time);
       gl.uniform3fv(u.uAmbient, L.ambient);
     };
+    const drawSky = (invM, cam) => {
+      gl.disable(gl.DEPTH_TEST);
+      gl.useProgram(sky.p);
+      shared(sky.u);
+      gl.uniform3fv(sky.u.uCam, cam);
+      gl.uniformMatrix4fv(sky.u.uInvViewProj, false, invM);
+      gl.uniform2fv(sky.u.uWindTo, [windTo[0], windTo[2]]);
+      gl.uniform1f(sky.u.uWindMs, cur.windMs);
+      gl.uniform4fv(sky.u.uTowers, towerU);
+      gl.uniformMatrix3fv(sky.u.uStarRot, false, starM);
+      gl.uniform4fv(sky.u.uStars, starU);
+      gl.uniform1fv(sky.u.uStarWarm, starWarm);
+      gl.uniform1f(sky.u.uNight, L.night);
+      gl.uniform1f(sky.u.uBank, L.bank);
+      gl.bindVertexArray(skyVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.enable(gl.DEPTH_TEST);
+    };
+    const drawSolids = (vp, clip) => {
+      gl.useProgram(solid.p);
+      shared(solid.u);
+      gl.uniformMatrix4fv(solid.u.uViewProj, false, vp);
+      gl.uniform1f(solid.u.uClip, clip);
+      gl.bindVertexArray(solidVao);
+      gl.drawArrays(gl.TRIANGLES, 0, solidCount);
 
-    gl.disable(gl.DEPTH_TEST);
-    gl.useProgram(sky.p);
-    shared(sky.u);
-    gl.uniformMatrix4fv(sky.u.uInvViewProj, false, inv);
-    gl.uniform2fv(sky.u.uWindTo, [windTo[0], windTo[2]]);
-    gl.uniform1f(sky.u.uWindMs, cur.windMs);
-    gl.uniform4fv(sky.u.uTowers, towerU);
-    gl.bindVertexArray(skyVao);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.useProgram(tree.p);
+      shared(tree.u);
+      gl.uniformMatrix4fv(tree.u.uViewProj, false, vp);
+      gl.uniform1f(tree.u.uClip, clip);
+      gl.bindVertexArray(treeVao);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, scene.trees.length);
+    };
 
-    gl.enable(gl.DEPTH_TEST);
+    // 1. The mirror: the world upside down in the water plane, as the lake will reflect it.
+    const mirrorVP = mul(viewProj, MIRROR);
+    post.beginMirror();
+    drawSky(invert(mirrorVP), [eye[0], -eye[1], eye[2]]);
+    drawSolids(mirrorVP, 1);
+
+    // 2. The scene, in HDR.
+    post.beginScene();
+    drawSky(inv, eye);
+
     gl.useProgram(surf.p);
     shared(surf.u);
     gl.uniformMatrix4fv(surf.u.uViewProj, false, viewProj);
@@ -963,7 +729,8 @@ export function createWater(canvas, {geo, level, onMeasure, marker}) {
     gl.uniform2fv(surf.u.uGridX, [-1.15, 1.15]);
     gl.uniform2fv(surf.u.uGridY, [-1.8, yTop]);
     gl.uniform1f(surf.u.uCell, (hfov * 1.15) / GX);
-    [['uTable', 0], ['uGeo', 1], ['uMat', 2], ['uShelter', 3], ['uFar', 4]].forEach(([n, i]) => gl.uniform1i(surf.u[n], i));
+    [['uTable', 0], ['uGeo', 1], ['uMat', 2], ['uShelter', 3], ['uFar', 4], ['uRefl', REFL_UNIT]].forEach(([n, i]) => gl.uniform1i(surf.u[n], i));
+    gl.uniform2f(surf.u.uRes, canvas.width, canvas.height);
     gl.uniform4fv(surf.u.uGeoBox, [G.x0, G.y0, G.nx * G.cell, G.ny * G.cell]);
     gl.uniform4fv(surf.u.uFarBox, [F.x0, F.y0, F.nx * F.cell, F.ny * F.cell]);
     gl.uniform3fv(surf.u.uBins, bins);
@@ -984,17 +751,12 @@ export function createWater(canvas, {geo, level, onMeasure, marker}) {
     gl.bindVertexArray(surfVao);
     gl.drawElements(gl.TRIANGLES, idx.length, gl.UNSIGNED_INT, 0);
 
-    gl.useProgram(solid.p);
-    shared(solid.u);
-    gl.uniformMatrix4fv(solid.u.uViewProj, false, viewProj);
-    gl.bindVertexArray(solidVao);
-    gl.drawArrays(gl.TRIANGLES, 0, solidCount);
+    drawSolids(viewProj, 0);
 
-    gl.useProgram(tree.p);
-    shared(tree.u);
-    gl.uniformMatrix4fv(tree.u.uViewProj, false, viewProj);
-    gl.bindVertexArray(treeVao);
-    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, scene.trees.length);
+    // 3. Bloom, brushwork, canvas.
+    // The colder and windier it is, the less steady the hand holding the brush.
+    const shiver = Math.min(1, 0.2 + 0.6 * smooth(8, 30, cur.windMph) + 0.25 * (1 - L.day));
+    post.finish({paint: view === VIEWS.top ? 0 : paint, bloom: 0.16, time, shiver});
 
     // Pin the break-point label on the lineup straight out from the mat.
     if (marker) {
@@ -1023,7 +785,7 @@ export function createWater(canvas, {geo, level, onMeasure, marker}) {
   const move = e => {
     if (!drag) return;
     yaw = (drag.yaw - (e.clientX - drag.x) * 0.15 + 360) % 360;
-    pitch = Math.max(-35, Math.min(10, drag.pitch + (e.clientY - drag.y) * 0.1));
+    pitch = Math.max(-35, Math.min(40, drag.pitch + (e.clientY - drag.y) * 0.1));
     api.onView?.(yaw);
   };
   const up = () => (drag = null);
@@ -1033,13 +795,28 @@ export function createWater(canvas, {geo, level, onMeasure, marker}) {
   canvas.addEventListener('pointercancel', up);
 
   const api = {
-    set(sea, sunPos, opts = {}) {
+    /** sky: the result of celestial() (sun az/el, moon, sidereal time, latitude). */
+    set(sea, sky, opts = {}) {
       target = sea;
       tau = opts.tau ?? 0.8;
-      if (sunPos) sunTarget = toWorld(sunPos.az, sunPos.el);
-      if (!cur) sun = [...sunTarget];
+      if (sky) {
+        sunTarget = toWorld(sky.az, sky.el);
+        if (sky.moon) { moonTarget = toWorld(sky.moon.az, sky.moon.el); moonLit = sky.moon.lit; }
+        if (sky.lst != null) lstTarget = sky.lst;
+        if (sky.lat != null) latR = sky.lat;
+      }
+      if (!cur) { sun = [...sunTarget]; moon = [...moonTarget]; lst = lstTarget; }
     },
     get yaw() { return yaw; },
+    /** Point the view: compass bearing and pitch in degrees. */
+    look(y, p) {
+      if (Number.isFinite(y)) yaw = ((y % 360) + 360) % 360;
+      if (Number.isFinite(p)) pitch = Math.max(-35, Math.min(40, p));
+      api.onView?.(yaw);
+    },
+    /** 0 = clear glass, 1 = thick paint. */
+    set paint(v) { paint = Math.max(0, Math.min(1, v)); },
+    get paint() { return paint; },
     /** 'mat' (water's edge off the beach mat) or 'hook' (on the fishing pier). */
     setView(name) {
       view = VIEWS[name] ?? VIEWS.mat;
@@ -1053,6 +830,7 @@ export function createWater(canvas, {geo, level, onMeasure, marker}) {
     onView: null,
     destroy() {
       cancelAnimationFrame(raf);
+      post.dispose();
       canvas.removeEventListener('pointerdown', down);
       canvas.removeEventListener('pointermove', move);
       canvas.removeEventListener('pointerup', up);
