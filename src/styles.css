@@ -299,7 +299,7 @@ body,
     left: 16px;
   }
   .stats {
-    top: 12px;
+    top: 62px;
     right: 16px;
     left: auto;
     width: 200px;
@@ -322,5 +322,58 @@ body,
   }
   .chart-daynum {
     display: none;
+  }
+}
+
+/* The numbers, folded: one line of glass until someone asks for more. */
+.chip {
+  position: absolute;
+  top: 20px;
+  right: 24px;
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  min-height: 36px;
+  padding: 7px 14px;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+  background: rgb(10 22 27 / 0.22);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgb(255 255 255 / 0.14);
+  border-radius: 999px;
+  cursor: pointer;
+  text-shadow: 0 1px 6px rgb(0 0 0 / 0.5);
+}
+.chip span {
+  opacity: 0.85;
+}
+.chip:focus-visible,
+.stats-close:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+.stats {
+  background: rgb(10 22 27 / 0.3);
+}
+.stats-close {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 44px;
+  height: 44px;
+  font-size: 22px;
+  line-height: 1;
+  color: #fff;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  z-index: 1;
+}
+@media (max-width: 760px) {
+  .chip {
+    top: 62px;
+    right: 16px;
   }
 }

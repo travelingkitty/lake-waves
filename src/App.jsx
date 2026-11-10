@@ -20,9 +20,18 @@ import {ForecastChart} from './ForecastChart.jsx';
 
 const STATION = '45198';
 const TZ = 'America/Chicago';
-const HOURS_PER_SECOND = 2; // playback speed; the water itself always runs in real time
+const HOURS_PER_SECOND = 3; // playback speed; the water itself always runs in real time
 const REPO = 'https://github.com/travelingkitty/lake-waves';
 const CHECK_MS = 10 * 60 * 1000; // how often an open page looks for a newer forecast run
+const DAYS = 5; // GLERL runs 10 days out; the page shows the first five, where the forecast is worth trusting
+
+/** The run cut to its first DAYS days: every hourly series, however deeply it is nested. */
+function clip(data) {
+  const n = data.time.length, keep = Math.min(n, DAYS * 24 + 1);
+  const cut = v => (Array.isArray(v) ? (v.length === n ? v.slice(0, keep) : v)
+    : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, cut(x)])) : v);
+  return {...data, time: data.time.slice(0, keep), hs: cut(data.hs), wind: cut(data.wind)};
+}
 
 /** The moment (ms) a fractional forecast index points at. */
 const timeAt = (data, f) => {
@@ -101,37 +110,20 @@ function Row({label, children}) {
   );
 }
 
-function Menu({data, level, onHide}) {
+function Menu({data, onClose, onHide}) {
   const run = data.source.initialized ? whenLabel(Date.parse(data.source.initialized)) : '—';
   return (
     <VStack gap={3}>
-      <VStack gap={0.5}>
-        <Heading level={2}>Montrose Beach · Chicago</Heading>
-        <Text type="supporting">Standing at the end of the beach mat, looking out at the lineup. Waves: {data.station.name} {data.station.id}, NOAA GLERL experimental forecast, run {run} CT.</Text>
-      </VStack>
+      <Heading level={2}>Montrose Beach · Chicago</Heading>
       <Text>
-        The shoreline, the dunes, the hook and its light, the beach house and the trees come from OpenStreetMap. The lake
-        bottom comes from NOAA bathymetry, and the towers on the horizon are real heights. The water level is NOAA&apos;s live
-        Calumet Harbor gauge: {(LWD + level).toFixed(2)} m, {level >= 0 ? '+' : ''}{(level * 100).toFixed(0)} cm over low-water datum.
+        A painting of the lake as NOAA GLERL forecasts it for the {data.station.name} (run {run} CT, refreshed by itself).
+        Offshore the water is the forecast, and at the beach the same waves break on the sandbars. Drag to look around.
       </Text>
-      <Text>
-        Offshore, the water is the forecast. Inshore, the same waves bend along the beach&apos;s depth contours. They lose
-        height behind the hook and break on the sandbars once they&apos;re too tall for the depth (about 0.6 × depth). The
-        bars are modelled, because Montrose&apos;s bars move from storm to storm.
-      </Text>
-      <Text>
-        It&apos;s a painting, not a photograph. The sun, the moon with tonight&apos;s phase, and the stars are where they
-        really are for the hour you pick. The hand gets less steady when it&apos;s cold and blowing, which is when
-        the lake is at its best.
-      </Text>
-      <Text type="supporting">
-        New forecast runs load by themselves: the site rebuilds from GLERL every hour and this page checks every 10 minutes.
-      </Text>
-      <Text type="supporting">Drag to look all the way around (downtown is behind you, to the south) · Space play/pause · ← → step an hour · H hide data</Text>
       <HStack gap={2} wrap="wrap">
-        <Button size="sm" label="GLERL wave forecasts" href={data.source.page} target="_blank" rel="noreferrer" />
-        <Button size="sm" label="Source on GitHub" href={REPO} target="_blank" rel="noreferrer" />
-        <Button size="sm" variant="ghost" label="Hide data (H)" onClick={onHide} />
+        <Button size="sm" variant="primary" label="Close" onClick={onClose} />
+        <Button size="sm" label="GLERL forecast" href={data.source.page} target="_blank" rel="noreferrer" />
+        <Button size="sm" label="Source" href={REPO} target="_blank" rel="noreferrer" />
+        <Button size="sm" variant="ghost" label="Hide data" onClick={onHide} />
       </HStack>
       <Text type="supporting">Map data © OpenStreetMap contributors (ODbL).</Text>
     </VStack>
@@ -147,6 +139,7 @@ export default function App() {
   const [measured, setMeasured] = useState(null);
   const [hidden, setHidden] = useState(() => new URLSearchParams(location.search).get('ui') === '0');
   const [menuOpen, setMenuOpen] = useState(false);
+  const [statsOpen, setStatsOpen] = useState(false);
   const [yaw, setYaw] = useState(27);
   const [geo, setGeo] = useState(null);
   const [view, setView] = useState('mat');
@@ -171,7 +164,8 @@ export default function App() {
         if (!r.ok) throw new Error(`No forecast file (data/${STATION}.json). Run: npm run data`);
         return r.json();
       })
-      .then(d => {
+      .then(full => {
+        const d = clip(full);
         setData(d);
         if (d.lakeLevel?.igld85) setLevel(d.lakeLevel.igld85 - LWD);
         // Open on "now" if the run covers it. ?t=thu jumps to the Thursday test case,
@@ -201,8 +195,9 @@ export default function App() {
       try {
         const r = await fetch(`data/${STATION}.json`, {cache: 'no-store'});
         if (!r.ok) return;
-        const d = await r.json();
-        if (!Array.isArray(d.time) || d.time.length < 2 || !d.hs?.ens) return;
+        const full = await r.json();
+        if (!Array.isArray(full.time) || full.time.length < 2 || !full.hs?.ens) return;
+        const d = clip(full);
         const fresh = d.source?.initialized !== old.source?.initialized || d.time[0] !== old.time[0] || d.time.length !== old.time.length;
         if (!fresh) return;
         const at = liveRef.current ? Date.now() : timeAt(old, fRef.current);
@@ -347,9 +342,9 @@ export default function App() {
       ) : data && cond && sea && (
         <>
           <div className="menu">
-            <Popover label="About this surf cam" placement="below" alignment="start" width={380} padding={4}
+            <Popover label="About this surf cam" placement="below" alignment="start" width={Math.min(360, window.innerWidth - 32)} padding={4}
               isOpen={menuOpen} onOpenChange={setMenuOpen}
-              content={<Menu data={data} level={level} onHide={() => { setMenuOpen(false); setHidden(true); }} />}>
+              content={<Menu data={data} onClose={() => setMenuOpen(false)} onHide={() => { setMenuOpen(false); setHidden(true); }} />}>
               <IconButton label="About and settings" variant="secondary" elevation="low" icon={<Icon icon="menu" />} />
             </Popover>
             <div className="views">
@@ -361,7 +356,15 @@ export default function App() {
             </div>
           </div>
 
+          {!statsOpen ? (
+            <button type="button" className="chip" aria-expanded="false" onClick={() => setStatsOpen(true)}
+              aria-label={`${cond.hsFt.toFixed(1)} feet offshore, wind ${cond.windFrom} ${cond.windMph.toFixed(0)} miles per hour. Show details`}>
+              <strong>{cond.hsFt.toFixed(1)} ft</strong>
+              <span>{cond.windFrom} {cond.windMph.toFixed(0)} mph</span>
+            </button>
+          ) : (
           <aside className="panel stats" aria-live="polite">
+            <button type="button" className="stats-close" aria-label="Close details" onClick={() => setStatsOpen(false)}>×</button>
             <VStack gap={3}>
               <VStack gap={0.5}>
                 <Text type="label" color="secondary">Offshore · {MODELS[cond.model].label}</Text>
@@ -416,6 +419,7 @@ export default function App() {
               </HStack>
             </VStack>
           </aside>
+          )}
 
           <footer className="panel timeline">
             <VStack gap={2}>

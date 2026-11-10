@@ -45,7 +45,7 @@ Other stations: `npm run data -- 45174`.
 
 `scripts/fetch-glerl.mjs` downloads
 `https://www.glerl.noaa.gov/emf/waves/WW3/xgb/fig/45198.json`. That's the
-Plotly figure behind the buoy popup on the GLERL page. It keeps, hourly for 10 days:
+Plotly figure behind the buoy popup on the GLERL page. It keeps, hourly for 10 days (the page shows the first 5):
 
 | Series | What it is |
 |---|---|
