@@ -136,7 +136,7 @@ export default function App() {
   const [error, setError] = useState(null);
   const [f, setF] = useState(0);
   const [playing, setPlaying] = useState(false);
-  const [model, setModel] = useState('ens');
+  const [model, setModel] = useState('ww3');
   const [measured, setMeasured] = useState(null);
   const [hidden, setHidden] = useState(() => new URLSearchParams(location.search).get('ui') === '0');
   const [menuOpen, setMenuOpen] = useState(false);
